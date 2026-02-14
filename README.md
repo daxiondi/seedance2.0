@@ -51,7 +51,7 @@ Seedance 2.0 Web 是一款面向内容创作者、设计师、营销人员的 AI
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/your-username/seedance.git
+git clone https://github.com/wwwzhouhui/seedance2.0.git
 cd seedance
 
 # 2. 安装所有依赖（前端 + 后端）
@@ -438,6 +438,10 @@ SessionID 有效期有限，过期后需要重新登录 jimeng.jianying.com 获�
 - [ ] WebSocket 替代轮询，实时推送生成状态
 - [ ] 视频缩略图预览
 
+## 致谢
+
+本项目的即梦 API 对接方案参考了 [jimeng-free-api-all](https://github.com/wwwzhouhui/jimeng-free-api-all) 项目，感谢该项目对即梦平台接口的逆向分析和文档整理，包括认证签名机制、ImageX CDN 上传流程、视频生成任务轮询等核心逻辑，为本项目的开发提供了重要参考。
+
 ## License
 
 本项目基于 [MIT](LICENSE) 协议开源。
@@ -448,6 +452,4 @@ SPDX-License-Identifier: MIT
 
 如果觉得项目不错，欢迎点个 Star ⭐
 
-<!-- 取消注释并替换为你的 GitHub 仓库地址
-[![Star History Chart](https://api.star-history.com/svg?repos=your-username/seedance&type=Date)](https://star-history.com/#your-username/seedance&Date)
--->
+[![Star History Chart](https://api.star-history.com/svg?repos=wwwzhouhui/seedance2.0&type=Date)](https://star-history.com/#wwwzhouhui/seedance2.0&Date)

@@ -47,10 +47,13 @@ const PLATFORM_CONFIGS = {
 };
 const DEFAULT_PLATFORM_KEY = 'jimeng';
 const DEFAULT_ASSISTANT_ID = 513695;
-const VERSION_CODE = '8.4.0';
+const VERSION_CODE_JIMENG = '8.4.0';
+// 取自 xyq 前端 bundle（appvr）
+const VERSION_CODE_XYQ = '5.8.0';
+// 取自 xyq 前端 bundle（app_id）
+const XYQ_APP_ID = '795647';
 const PLATFORM_CODE = '7';
 const WEB_ID = Math.random() * 999999999999999999 + 7000000000000000000;
-const USER_ID = crypto.randomUUID().replace(/-/g, '');
 
 const FAKE_HEADERS = {
   Accept: 'application/json, text/plain, */*',
@@ -59,7 +62,7 @@ const FAKE_HEADERS = {
   'App-Sdk-Version': '48.0.0',
   'Cache-control': 'no-cache',
   Appid: String(DEFAULT_ASSISTANT_ID),
-  Appvr: VERSION_CODE,
+  Appvr: VERSION_CODE_JIMENG,
   Lan: 'zh-Hans',
   Loc: 'cn',
   Pragma: 'no-cache',
@@ -83,12 +86,117 @@ function parsePlatform(rawPlatform) {
   return PLATFORM_CONFIGS[rawPlatform.trim()] || null;
 }
 
-function resolveSessionId(platformKey, requestSessionId) {
-  if (requestSessionId) return requestSessionId;
-  if (platformKey === 'xyq') {
-    return DEFAULT_XYQ_SESSION_ID || DEFAULT_SESSION_ID;
+const SESSION_TOKEN_COOKIE_KEYS = {
+  jimeng: [
+    'sessionid',
+    'sessionid_ss',
+    'sid_tt',
+    'sessionid_pippitcn_web',
+    'sessionid_ss_pippitcn_web',
+    'sid_tt_pippitcn_web',
+  ],
+  xyq: [
+    'sessionid_pippitcn_web',
+    'sessionid_ss_pippitcn_web',
+    'sid_tt_pippitcn_web',
+    'sessionid',
+    'sessionid_ss',
+    'sid_tt',
+  ],
+};
+
+function parseCookieString(rawCookie) {
+  const cookieMap = new Map();
+  if (typeof rawCookie !== 'string') return cookieMap;
+
+  const fragments = rawCookie.split(/[\n;]+/);
+  for (const rawFragment of fragments) {
+    const fragment = rawFragment.trim();
+    if (!fragment) continue;
+
+    let separatorIndex = fragment.indexOf('=');
+    let separator = '=';
+    if (separatorIndex <= 0) {
+      separatorIndex = fragment.indexOf(':');
+      separator = ':';
+    }
+    if (separatorIndex <= 0) continue;
+
+    const key = fragment.slice(0, separatorIndex).trim();
+    const value = fragment.slice(separatorIndex + separator.length).trim();
+    if (key && value) cookieMap.set(key, value);
   }
-  return DEFAULT_SESSION_ID;
+
+  return cookieMap;
+}
+
+function normalizeSessionInput(platformKey, rawInput) {
+  if (typeof rawInput !== 'string') return '';
+
+  const trimmed = rawInput.trim();
+  if (!trimmed) return '';
+
+  // 兼容 "sessionid_pippitcn_web:xxxx" 这种手动复制格式。
+  const colonMatch = trimmed.match(/^[a-zA-Z0-9_]+:(.+)$/);
+  if (colonMatch?.[1]) {
+    return colonMatch[1].trim();
+  }
+
+  // 兼容单条 "key=value" 或整段 Cookie 字符串粘贴。
+  if (!trimmed.includes('=')) {
+    return trimmed;
+  }
+
+  const cookieMap = parseCookieString(trimmed);
+  const candidateKeys =
+    SESSION_TOKEN_COOKIE_KEYS[platformKey] ||
+    SESSION_TOKEN_COOKIE_KEYS[DEFAULT_PLATFORM_KEY];
+
+  for (const cookieKey of candidateKeys) {
+    const token = cookieMap.get(cookieKey);
+    if (token) return token;
+  }
+
+  // 兜底: 仅包含一个 key=value 时直接取 value。
+  if (!trimmed.includes(';')) {
+    const separatorIndex = trimmed.indexOf('=');
+    if (separatorIndex > 0) {
+      const value = trimmed.slice(separatorIndex + 1).trim();
+      if (value) return value;
+    }
+  }
+
+  return '';
+}
+
+function resolveAuthContext(platformKey, requestSessionId) {
+  const cookieMap = parseCookieString(String(requestSessionId || ''));
+  const cookieHeader =
+    cookieMap.size > 0
+      ? Array.from(cookieMap.entries())
+          .map(([name, value]) => `${name}=${value}`)
+          .join('; ')
+      : '';
+
+  const normalizedRequestToken = normalizeSessionInput(
+    platformKey,
+    requestSessionId
+  );
+  if (normalizedRequestToken) {
+    return { sessionId: normalizedRequestToken, cookieHeader };
+  }
+
+  if (platformKey === 'xyq') {
+    const fallback = normalizeSessionInput(
+      platformKey,
+      DEFAULT_XYQ_SESSION_ID || DEFAULT_SESSION_ID
+    );
+    return { sessionId: fallback, cookieHeader: '' };
+  }
+  return {
+    sessionId: normalizeSessionInput(platformKey, DEFAULT_SESSION_ID),
+    cookieHeader: '',
+  };
 }
 
 // 模型映射
@@ -149,24 +257,126 @@ function md5(value) {
   return crypto.createHash('md5').update(value).digest('hex');
 }
 
-function generateCookie(sessionId) {
-  return [
-    `_tea_web_id=${WEB_ID}`,
-    `is_staff_user=false`,
-    `store-region=cn-gd`,
-    `store-region-src=uid`,
-    `uid_tt=${USER_ID}`,
-    `uid_tt_ss=${USER_ID}`,
-    `sid_tt=${sessionId}`,
-    `sessionid=${sessionId}`,
-    `sessionid_ss=${sessionId}`,
-  ].join('; ');
+function previewResponseBody(responseText, maxLength = 120) {
+  return String(responseText || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
 }
 
-function generateSign(uri) {
+function looksLikeHtml(responseText, contentType) {
+  const normalizedType = String(contentType || '').toLowerCase();
+  if (normalizedType.includes('text/html')) return true;
+
+  const normalizedBody = String(responseText || '')
+    .slice(0, 200)
+    .toLowerCase();
+  return (
+    normalizedBody.includes('<!doctype html') || normalizedBody.includes('<html')
+  );
+}
+
+function safeJsonParse(raw) {
+  if (typeof raw !== 'string') return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function findFirstValueByKeys(value, keys) {
+  const keySet = new Set((keys || []).map((k) => String(k).toLowerCase()));
+  const visited = new Set();
+
+  function walk(node) {
+    if (node === null || node === undefined) return null;
+
+    if (typeof node === 'string') {
+      const maybeJson =
+        node.includes('{') && node.includes('}') ? safeJsonParse(node) : null;
+      if (maybeJson) return walk(maybeJson);
+      return null;
+    }
+
+    if (typeof node !== 'object') return null;
+    if (visited.has(node)) return null;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = walk(item);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    for (const [k, v] of Object.entries(node)) {
+      if (keySet.has(String(k).toLowerCase())) {
+        if (v !== null && v !== undefined) {
+          const asString = String(v).trim();
+          if (asString) return asString;
+        }
+      }
+    }
+
+    for (const v of Object.values(node)) {
+      const found = walk(v);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  return walk(value);
+}
+
+function generateCookie(sessionId, platformConfig, rawCookieHeader = '') {
+  const defaultCookies =
+    platformConfig?.key === 'xyq'
+      ? [
+          ['is_staff_user_pippitcn_web', 'false'],
+          ['sid_tt_pippitcn_web', sessionId],
+          ['sessionid_pippitcn_web', sessionId],
+          ['sessionid_ss_pippitcn_web', sessionId],
+        ]
+      : [
+          ['_tea_web_id', String(WEB_ID)],
+          ['is_staff_user', 'false'],
+          ['store-region', 'cn-gd'],
+          ['store-region-src', 'uid'],
+          ['sid_tt', sessionId],
+          ['sessionid', sessionId],
+          ['sessionid_ss', sessionId],
+        ];
+
+  // 如果用户粘贴了部分 Cookie（例如只包含 sessionid），这里会补齐必要字段，避免鉴权失败。
+  if (rawCookieHeader) {
+    const cookieMap = parseCookieString(rawCookieHeader);
+    if (cookieMap.size > 0) {
+      for (const [name, value] of defaultCookies) {
+        if (!cookieMap.has(name)) cookieMap.set(name, value);
+      }
+      return Array.from(cookieMap.entries())
+        .map(([name, value]) => `${name}=${value}`)
+        .join('; ');
+    }
+  }
+
+  return defaultCookies.map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+function resolvePlatformAppVersion(platformConfig) {
+  if (platformConfig?.key === 'xyq') return VERSION_CODE_XYQ;
+  return VERSION_CODE_JIMENG;
+}
+
+function generateSign(pathname, platformConfig) {
   const deviceTime = unixTimestamp();
+  const appVersion = resolvePlatformAppVersion(platformConfig);
+  const normalizedPath = String(pathname || '/');
   const sign = md5(
-    `9e2c|${uri.slice(-7)}|${PLATFORM_CODE}|${VERSION_CODE}|${deviceTime}||11ac`
+    `9e2c|${normalizedPath.slice(-7)}|${PLATFORM_CODE}|${appVersion}|${deviceTime}||11ac`
   );
   return { deviceTime, sign };
 }
@@ -179,22 +389,28 @@ async function platformRequest(
   uri,
   sessionId,
   platformConfig,
-  options = {}
+  options = {},
+  authCookieHeader = ''
 ) {
-  const { deviceTime, sign } = generateSign(uri);
   const fullUrl = new URL(`${platformConfig.baseUrl}${uri}`);
+  const appVersion = resolvePlatformAppVersion(platformConfig);
+  const { deviceTime, sign } = generateSign(fullUrl.pathname, platformConfig);
 
-  const defaultParams = {
-    aid: DEFAULT_ASSISTANT_ID,
-    device_platform: 'web',
-    region: 'cn',
-    webId: WEB_ID,
-    da_version: '3.3.2',
-    web_component_open_flag: 1,
-    web_version: '7.5.0',
-    aigc_features: 'app_lip_sync',
-    ...(options.params || {}),
-  };
+  const defaultParams = uri.startsWith('/mweb/')
+    ? {
+        aid: DEFAULT_ASSISTANT_ID,
+        device_platform: 'web',
+        region: 'cn',
+        webId: WEB_ID,
+        da_version: '3.3.2',
+        web_component_open_flag: 1,
+        web_version: '7.5.0',
+        aigc_features: 'app_lip_sync',
+        ...(options.params || {}),
+      }
+    : {
+        ...(options.params || {}),
+      };
 
   for (const [key, value] of Object.entries(defaultParams)) {
     fullUrl.searchParams.set(key, String(value));
@@ -202,9 +418,10 @@ async function platformRequest(
 
   const headers = {
     ...FAKE_HEADERS,
+    Appvr: appVersion,
     Origin: platformConfig.baseUrl,
     Referer: platformConfig.baseUrl,
-    Cookie: generateCookie(sessionId),
+    Cookie: generateCookie(sessionId, platformConfig, authCookieHeader),
     'Device-Time': String(deviceTime),
     Sign: sign,
     'Sign-Ver': '1',
@@ -229,7 +446,33 @@ async function platformRequest(
         ...fetchOptions,
         signal: AbortSignal.timeout(45000),
       });
-      const data = await response.json();
+      const responseText = await response.text();
+      const contentType = response.headers.get('content-type') || '';
+      let data = null;
+
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        if (looksLikeHtml(responseText, contentType)) {
+          throw Object.assign(
+            new Error(
+              `${platformConfig.name}鉴权失效或触发安全校验，请在${platformConfig.baseUrl}重新登录并完成验证后，更新最新 Cookie 中的 ${
+                platformConfig.key === 'xyq'
+                  ? 'sessionid_pippitcn_web'
+                  : 'sessionid'
+              }`
+            ),
+            { isApiError: true }
+          );
+        }
+
+        throw Object.assign(
+          new Error(
+            `${platformConfig.name}响应非JSON (HTTP ${response.status}): ${previewResponseBody(responseText)}`
+          ),
+          { isApiError: true }
+        );
+      }
 
       if (isFinite(Number(data.ret))) {
         if (String(data.ret) === '0') return data.data;
@@ -256,6 +499,84 @@ async function platformRequest(
       );
     }
   }
+}
+
+async function platformRequestViaBrowser(
+  method,
+  uri,
+  sessionId,
+  platformConfig,
+  options = {},
+  authCookieHeader = ''
+) {
+  const fullUrl = new URL(`${platformConfig.baseUrl}${uri}`);
+  const appVersion = resolvePlatformAppVersion(platformConfig);
+  const { deviceTime, sign } = generateSign(fullUrl.pathname, platformConfig);
+
+  const defaultParams = uri.startsWith('/mweb/')
+    ? {
+        aid: DEFAULT_ASSISTANT_ID,
+        device_platform: 'web',
+        region: 'cn',
+        webId: WEB_ID,
+        da_version: '3.3.2',
+        web_component_open_flag: 1,
+        web_version: '7.5.0',
+        aigc_features: 'app_lip_sync',
+        ...(options.params || {}),
+      }
+    : {
+        ...(options.params || {}),
+      };
+
+  for (const [key, value] of Object.entries(defaultParams)) {
+    fullUrl.searchParams.set(key, String(value));
+  }
+
+  // 浏览器 fetch 无法手动设置 Cookie/User-Agent/Origin/Referer 等受限头；
+  // 这里仅附加必要的签名相关头，Cookie 由浏览器上下文自动携带。
+  const headers = {
+    Accept: FAKE_HEADERS.Accept,
+    'Accept-language': FAKE_HEADERS['Accept-language'],
+    Pf: PLATFORM_CODE,
+    Appvr: appVersion,
+    'Device-Time': String(deviceTime),
+    Sign: sign,
+    'Sign-Ver': '1',
+    ...(options.headers || {}),
+  };
+
+  const fetchOptions = { method: method.toUpperCase(), headers };
+  if (options.data !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    fetchOptions.body = JSON.stringify(options.data);
+  } else if (options.body !== undefined) {
+    fetchOptions.body = options.body;
+  }
+
+  const result = await browserService.fetch(
+    sessionId,
+    WEB_ID,
+    '',
+    fullUrl.toString(),
+    fetchOptions,
+    platformConfig,
+    authCookieHeader
+  );
+
+  if (result?.ret !== undefined) {
+    if (String(result.ret) === '0') return result.data;
+    const retCode = String(result.ret);
+    const errMsg = result.errmsg || retCode;
+    if (retCode === '5000') {
+      throw new Error(
+        `${platformConfig.name}积分不足，请前往${platformConfig.name}官网领取积分`
+      );
+    }
+    throw new Error(`${platformConfig.name}API错误 (ret=${retCode}): ${errMsg}`);
+  }
+
+  return result;
 }
 
 // ============================================================
@@ -376,7 +697,12 @@ function calculateCRC32(buffer) {
 // ============================================================
 // 图片上传 (4步 ImageX 流程)
 // ============================================================
-async function uploadImageBuffer(buffer, sessionId, platformConfig) {
+async function uploadImageBuffer(
+  buffer,
+  sessionId,
+  platformConfig,
+  authCookieHeader = ''
+) {
   console.log(`  [upload] 开始上传图片, 大小: ${buffer.length} 字节`);
 
   // 第1步: 获取上传令牌
@@ -385,7 +711,8 @@ async function uploadImageBuffer(buffer, sessionId, platformConfig) {
     '/mweb/v1/get_upload_token',
     sessionId,
     platformConfig,
-    { data: { scene: 2 } }
+    { data: { scene: 2 } },
+    authCookieHeader
   );
 
   const { access_key_id, secret_access_key, session_token, service_id } =
@@ -544,6 +871,11 @@ async function uploadImageBuffer(buffer, sessionId, platformConfig) {
 // 解析 prompt 中的图片占位符, 构建 meta_list
 // ============================================================
 function buildMetaListFromPrompt(prompt, imageCount) {
+  const normalizedPrompt = String(prompt || '').trim();
+  if (imageCount <= 0) {
+    return [{ meta_type: 'text', text: normalizedPrompt || '生成视频' }];
+  }
+
   const metaList = [];
   const placeholderRegex = /@(?:图|image)?(\d+)/gi;
   let lastIndex = 0;
@@ -588,14 +920,309 @@ function buildMetaListFromPrompt(prompt, imageCount) {
       if (i < imageCount - 1)
         metaList.push({ meta_type: 'text', text: '和' });
     }
-    if (prompt && prompt.trim()) {
-      metaList.push({ meta_type: 'text', text: `图片，${prompt}` });
+    if (normalizedPrompt) {
+      metaList.push({ meta_type: 'text', text: `图片，${normalizedPrompt}` });
     } else {
       metaList.push({ meta_type: 'text', text: '图片生成视频' });
     }
   }
 
   return metaList;
+}
+
+// ============================================================
+// 小云雀 (xyq) - Agent 生成链路
+// ============================================================
+async function generateXyqAgentVideo(
+  taskId,
+  { prompt, ratio, files, sessionId, authCookieHeader, platformConfig }
+) {
+  const task = tasks.get(taskId);
+  const normalizedPrompt = String(prompt || '').trim();
+  if (!normalizedPrompt) {
+    throw new Error('小云雀当前仅支持纯文本要点生成，请先填写提示词');
+  }
+
+  if (Array.isArray(files) && files.length > 0) {
+    console.log(
+      `[${taskId}] [小云雀] 收到 ${files.length} 张参考图，但当前实现暂不支持参考图，将按纯文本生成`
+    );
+  }
+
+  const requestHeaders = {
+    Referer: platformConfig.generatePageUrl,
+  };
+
+  task.progress = '正在获取小云雀用户信息...';
+
+  let userInfo = null;
+  try {
+    userInfo = await platformRequestViaBrowser(
+      'get',
+      '/api/biz/v1/user/info',
+      sessionId,
+      platformConfig,
+      { headers: requestHeaders },
+      authCookieHeader
+    );
+  } catch (err) {
+    console.log(`[${taskId}] 获取 user/info 失败: ${err.message}`);
+  }
+
+  let workspaceInfo = null;
+  try {
+    workspaceInfo = await platformRequestViaBrowser(
+      'post',
+      '/api/web/v1/workspace/get_user_workspace',
+      sessionId,
+      platformConfig,
+      { data: {}, headers: requestHeaders },
+      authCookieHeader
+    );
+  } catch (err) {
+    console.log(`[${taskId}] 获取 workspace 信息失败: ${err.message}`);
+  }
+
+  const consumerUid = String(
+    userInfo?.consumer_uid ||
+      userInfo?.user_info?.consumer_uid ||
+      userInfo?.user?.consumer_uid ||
+      workspaceInfo?.consumer_uid ||
+      workspaceInfo?.uid ||
+      ''
+  ).trim();
+
+  const workspaceId = String(
+    userInfo?.workspace_id ||
+      userInfo?.user_info?.workspace_id ||
+      userInfo?.user?.workspace_id ||
+      workspaceInfo?.workspace_id ||
+      workspaceInfo?.data?.workspace_id ||
+      workspaceInfo?.workspace?.workspace_id ||
+      ''
+  ).trim();
+
+  const spaceId = String(
+    userInfo?.space_id ||
+      userInfo?.user_info?.space_id ||
+      userInfo?.user?.space_id ||
+      workspaceInfo?.space_id ||
+      workspaceInfo?.data?.space_id ||
+      workspaceInfo?.workspace?.space_id ||
+      ''
+  ).trim();
+
+  if (!consumerUid || !workspaceId) {
+    throw new Error(
+      `无法获取小云雀用户信息（consumer_uid/workspace_id）。请确认已在 ${platformConfig.baseUrl} 登录并完成验证，然后在设置里粘贴最新 Cookie 后重试`
+    );
+  }
+
+  const xyqUserInfo = {
+    consumer_uid: consumerUid,
+    workspace_id: workspaceId,
+    app_id: XYQ_APP_ID,
+    ...(spaceId ? { space_id: spaceId } : {}),
+  };
+
+  const content = [
+    { type: 'text', sub_type: 'text', data: normalizedPrompt },
+  ];
+
+  // 可选：比例透传为 image_settings（和前端一致）
+  if (ratio && typeof ratio === 'string') {
+    const settings = { ratio: ratio.trim() };
+    if (settings.ratio) {
+      content.push({
+        type: 'data',
+        sub_type: 'biz/image_settings',
+        data: JSON.stringify(settings),
+      });
+    }
+  }
+
+  const threadId = generateUUID();
+  const runId = generateUUID();
+  const message = {
+    message_id: '',
+    role: 'user',
+    thread_id: threadId,
+    run_id: runId,
+    created_at: Date.now(),
+    content,
+  };
+
+  task.progress = '正在提交小云雀生成任务...';
+
+  const submitResult = await platformRequestViaBrowser(
+    'post',
+    '/api/biz/v1/agent/submit_run',
+    sessionId,
+    platformConfig,
+    {
+      data: {
+        message,
+        user_info: xyqUserInfo,
+        agent_name: 'pippit_video_agent_v2_cn',
+        entrance_from: 'web',
+        request_id: generateUUID(),
+      },
+      headers: requestHeaders,
+    },
+    authCookieHeader
+  );
+
+  const actualThreadId =
+    submitResult?.run?.thread_id ||
+    submitResult?.thread_id ||
+    submitResult?.thread?.thread_id ||
+    threadId;
+  const actualRunId =
+    submitResult?.run?.run_id || submitResult?.run_id || runId;
+
+  console.log(
+    `[${taskId}] [小云雀] submit_run 已提交: thread_id=${actualThreadId}, run_id=${actualRunId}`
+  );
+
+  // 轮询任务状态
+  task.progress = '已提交，等待AI生成视频...';
+
+  const pollStart = Date.now();
+  let artifactId = null;
+
+  while (Date.now() - pollStart < VIDEO_GENERATION_TIMEOUT_MS) {
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const threadData = await platformRequestViaBrowser(
+      'post',
+      '/api/biz/v1/agent/get_thread',
+      sessionId,
+      platformConfig,
+      {
+        data: {
+          thread_id: actualThreadId,
+          scopes: ['run_list.entry_list'],
+          run_id: actualRunId,
+        },
+        headers: requestHeaders,
+      },
+      authCookieHeader
+    );
+
+    const runList =
+      threadData?.thread?.run_list ||
+      threadData?.run_list ||
+      threadData?.thread?.runs ||
+      threadData?.runs ||
+      [];
+    const run =
+      runList.find(
+        (item) => String(item?.run_id || item?.id || '') === String(actualRunId)
+      ) ||
+      runList[0] ||
+      threadData?.run ||
+      null;
+
+    const state =
+      run?.state ??
+      run?.status ??
+      run?.run_state ??
+      threadData?.state ??
+      null;
+
+    const entryList = run?.entry_list || run?.entryList || run?.entries || [];
+
+    if (String(state) === '3') {
+      const artifactEntry =
+        entryList.find(
+          (entry) =>
+            String(entry?.type) === '2' ||
+            entry?.artifact_id ||
+            entry?.artifactId
+        ) || null;
+      artifactId =
+        artifactEntry?.artifact_id ||
+        artifactEntry?.artifactId ||
+        findFirstValueByKeys(threadData, ['artifact_id', 'artifactId']);
+      break;
+    }
+
+    if (String(state) === '4') {
+      const failReason =
+        run?.fail_reason ||
+        run?.error_message ||
+        run?.errmsg ||
+        threadData?.errmsg ||
+        '未知错误';
+      throw new Error(`小云雀生成失败: ${failReason}`);
+    }
+
+    const elapsed = Math.floor((Date.now() - task.startTime) / 1000);
+    const mins = Math.floor(elapsed / 60);
+    if (elapsed < 120) {
+      task.progress = 'AI正在生成视频，请耐心等待...';
+    } else {
+      task.progress = `视频生成中，已等待 ${mins} 分钟...`;
+    }
+  }
+
+  if (!artifactId) {
+    throw new Error('小云雀生成超时或未返回 artifact_id，请稍后重试');
+  }
+
+  task.progress = '正在解析生成结果...';
+
+  const artifactResult = await platformRequestViaBrowser(
+    'post',
+    '/api/biz/v1/agent/get_run_artifact',
+    sessionId,
+    platformConfig,
+    {
+      data: { artifact_id: String(artifactId), user_id: String(consumerUid) },
+      headers: requestHeaders,
+    },
+    authCookieHeader
+  );
+
+  const pippitAssetId = findFirstValueByKeys(artifactResult, [
+    'pippit_asset_id',
+    'PippitAssetID',
+    'pippitAssetId',
+    'pippitAssetID',
+  ]);
+  if (!pippitAssetId) {
+    throw new Error('未找到生成视频的 PippitAssetID');
+  }
+
+  task.progress = '正在获取视频下载地址...';
+
+  const assetDetail = await platformRequestViaBrowser(
+    'post',
+    '/api/biz/v1/asset/detail',
+    sessionId,
+    platformConfig,
+    {
+      data: { PippitAssetID: String(pippitAssetId), Base: { Client: 'web' } },
+      headers: requestHeaders,
+    },
+    authCookieHeader
+  );
+
+  const videoInfo = assetDetail?.Video || assetDetail?.video || null;
+  const videoUrl =
+    videoInfo?.download_url ||
+    videoInfo?.origin_url ||
+    videoInfo?.preview_url ||
+    assetDetail?.download_url ||
+    assetDetail?.origin_url ||
+    assetDetail?.preview_url;
+
+  if (!videoUrl) {
+    throw new Error('未能从小云雀获取视频URL');
+  }
+
+  console.log(`[${taskId}] [小云雀] 视频URL获取成功`);
+  return videoUrl;
 }
 
 // ============================================================
@@ -609,6 +1236,7 @@ async function generateSeedanceVideo(
     duration,
     files,
     sessionId,
+    authCookieHeader,
     model: requestModel,
     platformConfig,
   }
@@ -621,33 +1249,38 @@ async function generateSeedanceVideo(
 
   const resConfig = VIDEO_RESOLUTION[ratio] || VIDEO_RESOLUTION['4:3'];
   const { width, height } = resConfig;
+  const normalizedPrompt = String(prompt || '').trim();
 
   console.log(
     `[${taskId}] [${platformConfig.name}] ${modelKey}: ${width}x${height} (${ratio}) ${actualDuration}秒`
   );
 
-  // 第1步: 上传图片
-  task.progress = '正在上传参考图片...';
+  // 第1步: 上传图片（可选）
   const uploadedImages = [];
+  if (files.length > 0) {
+    task.progress = '正在上传参考图片...';
+    for (let i = 0; i < files.length; i++) {
+      task.progress = `正在上传第 ${i + 1}/${files.length} 张图片...`;
+      console.log(
+        `[${taskId}] 上传图片 ${i + 1}/${files.length}: ${files[i].originalname} (${(files[i].size / 1024).toFixed(1)}KB)`
+      );
 
-  for (let i = 0; i < files.length; i++) {
-    task.progress = `正在上传第 ${i + 1}/${files.length} 张图片...`;
+      const imageUri = await uploadImageBuffer(
+        files[i].buffer,
+        sessionId,
+        platformConfig,
+        authCookieHeader
+      );
+      uploadedImages.push({ uri: imageUri, width, height });
+      console.log(`[${taskId}] 图片 ${i + 1} 上传成功`);
+    }
     console.log(
-      `[${taskId}] 上传图片 ${i + 1}/${files.length}: ${files[i].originalname} (${(files[i].size / 1024).toFixed(1)}KB)`
+      `[${taskId}] 全部 ${uploadedImages.length} 张图片上传完成`
     );
-
-    const imageUri = await uploadImageBuffer(
-      files[i].buffer,
-      sessionId,
-      platformConfig
-    );
-    uploadedImages.push({ uri: imageUri, width, height });
-    console.log(`[${taskId}] 图片 ${i + 1} 上传成功`);
+  } else {
+    task.progress = '未上传参考图，使用文生视频模式...';
+    console.log(`[${taskId}] 未上传参考图，尝试文生视频模式`);
   }
-
-  console.log(
-    `[${taskId}] 全部 ${uploadedImages.length} 张图片上传完成`
-  );
 
   // 第2步: 构建 material_list 和 meta_list
   const materialList = uploadedImages.map((img) => ({
@@ -672,6 +1305,7 @@ async function generateSeedanceVideo(
     },
   }));
 
+  const hasReferenceImages = uploadedImages.length > 0;
   const metaList = buildMetaListFromPrompt(prompt || '', uploadedImages.length);
 
   const componentId = generateUUID();
@@ -779,17 +1413,21 @@ async function generateSeedanceVideo(
                     type: '',
                     id: generateUUID(),
                     min_version: SEEDANCE_DRAFT_VERSION,
-                    prompt: '',
-                    video_mode: 2,
+                    prompt: hasReferenceImages ? '' : normalizedPrompt,
+                    video_mode: hasReferenceImages ? 2 : 1,
                     fps: 24,
                     duration_ms: actualDuration * 1000,
                     idip_meta_list: [],
-                    unified_edit_input: {
-                      type: '',
-                      id: generateUUID(),
-                      material_list: materialList,
-                      meta_list: metaList,
-                    },
+                    ...(hasReferenceImages
+                      ? {
+                          unified_edit_input: {
+                            type: '',
+                            id: generateUUID(),
+                            material_list: materialList,
+                            meta_list: metaList,
+                          },
+                        }
+                      : {}),
                   },
                 ],
                 video_aspect_ratio: aspectRatio,
@@ -817,8 +1455,9 @@ async function generateSeedanceVideo(
       await browserService.refreshSession(
         sessionId,
         WEB_ID,
-        USER_ID,
-        platformConfig
+        '',
+        platformConfig,
+        authCookieHeader
       );
       await new Promise((r) => setTimeout(r, 1200));
     }
@@ -826,14 +1465,15 @@ async function generateSeedanceVideo(
     generateResult = await browserService.fetch(
       sessionId,
       WEB_ID,
-      USER_ID,
+      '',
       generateUrl,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(generateBody),
       },
-      platformConfig
+      platformConfig,
+      authCookieHeader
     );
 
     if (String(generateResult?.ret) === '4010' && attempt === 0) {
@@ -887,7 +1527,8 @@ async function generateSeedanceVideo(
         '/mweb/v1/get_history_by_ids',
         sessionId,
         platformConfig,
-        { data: { history_ids: [historyId] } }
+        { data: { history_ids: [historyId] } },
+        authCookieHeader
       );
 
       const historyData = result?.history_list?.[0] || result?.[historyId];
@@ -967,7 +1608,8 @@ async function generateSeedanceVideo(
             pack_item_opt: { scene: 1, need_data_integrity: true },
             is_for_video_download: true,
           },
-        }
+        },
+        authCookieHeader
       );
 
       const hqItemList =
@@ -1024,25 +1666,24 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
 
   try {
     const { prompt, ratio, duration, sessionId, model, platform: rawPlatform } = req.body;
-    const files = req.files;
+    const files = Array.isArray(req.files) ? req.files : [];
     const platformConfig = parsePlatform(rawPlatform);
     if (!platformConfig) {
       return res.status(400).json({ error: '不支持的平台类型，仅支持 jimeng / xyq' });
     }
 
     // 认证检查
-    const authToken = resolveSessionId(platformConfig.key, sessionId);
-    if (!authToken) {
+    const authContext = resolveAuthContext(platformConfig.key, sessionId);
+    if (!authContext.sessionId) {
       return res
         .status(401)
         .json({ error: `未配置 ${platformConfig.name} Session ID，请在设置中填写` });
     }
 
-    // Seedance 2.0 需要至少一张图片
-    if (!Array.isArray(files) || files.length === 0) {
+    if (!String(prompt || '').trim() && files.length === 0) {
       return res
         .status(400)
-        .json({ error: 'Seedance 2.0 需要至少上传一张参考图片' });
+        .json({ error: '请至少提供提示词或上传一张参考图' });
     }
 
     // 创建任务
@@ -1073,12 +1714,16 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     res.json({ taskId });
 
     // 后台执行视频生成
-    generateSeedanceVideo(taskId, {
+    const generator =
+      platformConfig.key === 'xyq' ? generateXyqAgentVideo : generateSeedanceVideo;
+
+    generator(taskId, {
       prompt,
       ratio: ratio || '4:3',
       duration: parseInt(duration) || 4,
       files,
-      sessionId: authToken,
+      sessionId: authContext.sessionId,
+      authCookieHeader: authContext.cookieHeader,
       model: model || 'seedance-2.0',
       platformConfig,
     })

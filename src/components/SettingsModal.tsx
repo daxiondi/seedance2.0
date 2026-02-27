@@ -154,7 +154,9 @@ export default function SettingsModal({
               </button>
             </div>
             <p className="text-xs text-gray-500 mt-1">
-              从 {currentPlatformInfo.domain} 的 Cookie 中获取 sessionid
+              {currentPlatform === 'xyq'
+                ? '可粘贴 sessionid_pippitcn_web / sid_tt_pippitcn_web 的值，或整段 Cookie（后端会自动提取）'
+                : `从 ${currentPlatformInfo.domain} 的 Cookie 中获取 sessionid`}
             </p>
             <p className="text-xs text-gray-600 mt-1">
               即梦和小云雀会分别保存各自的 session，互不覆盖。

@@ -12,6 +12,24 @@ function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+function previewBody(text: string, maxLength = 120): string {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+async function parseJsonResponse<T>(response: Response, scene: string): Promise<T> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `${scene}失败：服务返回非JSON (HTTP ${response.status})，响应片段：${previewBody(text)}`
+    );
+  }
+}
+
 export async function generateVideo(
   request: GenerateVideoRequest,
   onProgress?: (message: string) => void
@@ -40,7 +58,10 @@ export async function generateVideo(
     body: formData,
   });
 
-  const submitData = await submitRes.json();
+  const submitData = await parseJsonResponse<{ taskId?: string; error?: string }>(
+    submitRes,
+    '提交任务'
+  );
   if (!submitRes.ok) {
     throw new Error(submitData.error || `提交失败 (HTTP ${submitRes.status})`);
   }
@@ -60,7 +81,12 @@ export async function generateVideo(
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
     const pollRes = await fetch(apiUrl(`/task/${taskId}`));
-    const pollData = await pollRes.json();
+    const pollData = await parseJsonResponse<{
+      status?: string;
+      result?: VideoGenerationResponse;
+      error?: string;
+      progress?: string;
+    }>(pollRes, '轮询任务');
 
     if (pollData.status === 'done') {
       const result = pollData.result;

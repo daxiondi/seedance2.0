@@ -418,27 +418,6 @@ v0.0.2 已修复此问题。该错误是即梦平台的 shark 反爬机制拦截
 
 </details>
 
-## 技术交流群
-
-欢迎加入技术交流群，分享使用心得和创作成果：
-
-![技术交流群](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/%25E5%25BE%25AE%25E4%25BF%25A1%25E5%259B%25BE%25E7%2589%2587_20260223133201_158_292.jpg)
-
-## 作者联系
-
-- **微信**: laohaibao2025
-- **邮箱**: 75271002@qq.com
-
-![微信二维码](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Screenshot_20260123_095617_com.tencent.mm.jpg)
-
-## 打赏
-
-如果这个项目对你有帮助，欢迎请我喝杯咖啡 ☕
-
-**微信支付**
-
-![微信支付](https://mypicture-1258720957.cos.ap-nanjing.myqcloud.com/Obsidian/image-20250914152855543.png)
-
 ## 项目统计
 
 ### 版本历史

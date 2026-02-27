@@ -11,6 +11,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
 const DEFAULT_SESSION_ID = process.env.VITE_DEFAULT_SESSION_ID || '';
+const configuredTimeoutMs = Number(process.env.VIDEO_GENERATION_TIMEOUT_MS);
+const VIDEO_GENERATION_TIMEOUT_MS =
+  Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+    ? configuredTimeoutMs
+    : 45 * 60 * 1000;
 
 app.use(cors());
 app.use(express.json());
@@ -751,23 +756,43 @@ async function generateSeedanceVideo(
     },
   };
 
-  const generateResult = await browserService.fetch(
-    sessionId,
-    WEB_ID,
-    USER_ID,
-    generateUrl,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(generateBody),
+  let generateResult = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) {
+      task.progress = '检测到安全校验，正在刷新会话后重试...';
+      console.log(`[${taskId}] ret=4010，刷新浏览器会话并重试`);
+      await browserService.refreshSession(sessionId, WEB_ID, USER_ID);
+      await new Promise((r) => setTimeout(r, 1200));
     }
-  );
+
+    generateResult = await browserService.fetch(
+      sessionId,
+      WEB_ID,
+      USER_ID,
+      generateUrl,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(generateBody),
+      }
+    );
+
+    if (String(generateResult?.ret) === '4010' && attempt === 0) {
+      continue;
+    }
+    break;
+  }
 
   // 解析浏览器代理返回的结果
   if (generateResult.ret !== undefined && String(generateResult.ret) !== '0') {
     const retCode = String(generateResult.ret);
     const errMsg = generateResult.errmsg || retCode;
     if (retCode === '5000') throw new Error('即梦积分不足，请前往即梦官网领取积分');
+    if (retCode === '4010') {
+      throw new Error(
+        '即梦API错误 (ret=4010): 触发安全校验。请先在即梦官网完成安全确认，然后更新最新 sessionid 再重试'
+      );
+    }
     throw new Error(`即梦API错误 (ret=${retCode}): ${errMsg}`);
   }
 
@@ -784,9 +809,15 @@ async function generateSeedanceVideo(
   let status = 20;
   let failCode;
   let itemList = [];
-  const maxRetries = 60;
+  const maxRetries = Math.max(
+    60,
+    Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 2000)
+  );
 
   for (let retryCount = 0; retryCount < maxRetries && status === 20; retryCount++) {
+    const elapsedMs = Date.now() - task.startTime;
+    if (elapsedMs >= VIDEO_GENERATION_TIMEOUT_MS) break;
+
     try {
       const result = await jimengRequest(
         'post',
@@ -846,8 +877,10 @@ async function generateSeedanceVideo(
     }
   }
 
-  if (status === 20)
-    throw new Error('视频生成超时 (约20分钟)，请稍后重试');
+  if (status === 20) {
+    const timeoutMinutes = Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 60000);
+    throw new Error(`视频生成超时 (约${timeoutMinutes}分钟)，请稍后重试`);
+  }
 
   // 第5步: 获取高清视频URL
   task.progress = '正在获取高清视频...';
@@ -1123,6 +1156,9 @@ process.on('SIGINT', () => {
 app.listen(PORT, () => {
   console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
   console.log(`🔗 直连即梦 API (jimeng.jianying.com)`);
+  console.log(
+    `⏱️ 生成超时时间: ${Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 60000)} 分钟`
+  );
   console.log(
     `🔑 默认 Session ID: ${DEFAULT_SESSION_ID ? `已配置 (长度${DEFAULT_SESSION_ID.length})` : '未配置'}`
   );

@@ -6,6 +6,7 @@ import type {
   ReferenceMode,
   UploadedImage,
   GenerationState,
+  GenerationHistoryItem,
 } from './types';
 import { RATIO_OPTIONS, DURATION_OPTIONS, REFERENCE_MODES, MODEL_OPTIONS } from './types';
 import { generateVideo } from './services/videoService';
@@ -14,6 +15,63 @@ import SettingsModal, { loadSettings } from './components/SettingsModal';
 import { GearIcon, PlusIcon, CloseIcon, SparkleIcon } from './components/Icons';
 
 let nextId = 0;
+const HISTORY_COOKIE_KEY = 'seedance_history_v1';
+const HISTORY_COOKIE_DAYS = 30;
+const MAX_HISTORY_ITEMS = 5;
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(
+  /\/+$/,
+  ''
+);
+type NotificationState = NotificationPermission | 'unsupported';
+
+function getNotificationState(): NotificationState {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return 'unsupported';
+  }
+  return Notification.permission;
+}
+
+function getCookie(name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function setCookie(name: string, value: string, days: number) {
+  const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
+function loadHistoryFromCookie(): GenerationHistoryItem[] {
+  try {
+    const raw = getCookie(HISTORY_COOKIE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is GenerationHistoryItem => {
+      return (
+        item &&
+        typeof item.id === 'string' &&
+        typeof item.createdAt === 'number' &&
+        typeof item.videoUrl === 'string'
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function saveHistoryToCookie(items: GenerationHistoryItem[]) {
+  setCookie(HISTORY_COOKIE_KEY, JSON.stringify(items.slice(0, MAX_HISTORY_ITEMS)), HISTORY_COOKIE_DAYS);
+}
+
+function formatDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString('zh-CN', { hour12: false });
+}
+
+function buildProxyVideoUrl(rawVideoUrl: string): string {
+  return `${API_BASE}/video-proxy?url=${encodeURIComponent(rawVideoUrl)}`;
+}
 
 export default function App() {
   const [images, setImages] = useState<UploadedImage[]>([]);
@@ -25,19 +83,27 @@ export default function App() {
   const [generation, setGeneration] = useState<GenerationState>({
     status: 'idle',
   });
+  const [historyItems, setHistoryItems] = useState<GenerationHistoryItem[]>([]);
   const [sessionId, setSessionId] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [notificationState, setNotificationState] =
+    useState<NotificationState>('unsupported');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const maxImages = 5;
 
   useEffect(() => {
     const saved = loadSettings();
     if (saved.sessionId) setSessionId(saved.sessionId);
+    setHistoryItems(loadHistoryFromCookie());
 
     const envSessionId = import.meta.env.VITE_DEFAULT_SESSION_ID;
     if (!saved.sessionId && !envSessionId) {
       setShowSettings(true);
     }
+  }, []);
+
+  useEffect(() => {
+    setNotificationState(getNotificationState());
   }, []);
 
   const addFiles = useCallback(
@@ -77,10 +143,60 @@ export default function App() {
     setImages([]);
   }, [images]);
 
+  const notifyByBrowser = useCallback((title: string, body: string) => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    const notice = new Notification(title, { body });
+    notice.onclick = () => window.focus();
+  }, []);
+
+  const ensureNotificationPermission = useCallback(async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      try {
+        const permission = await Notification.requestPermission();
+        setNotificationState(permission);
+      } catch {
+        // 忽略权限请求异常，不影响主流程
+      }
+      return;
+    }
+    setNotificationState(Notification.permission);
+  }, []);
+
+  const appendHistory = useCallback((item: GenerationHistoryItem) => {
+    setHistoryItems((prev) => {
+      const next = [item, ...prev].slice(0, MAX_HISTORY_ITEMS);
+      saveHistoryToCookie(next);
+      return next;
+    });
+  }, []);
+
+  const clearHistory = useCallback(() => {
+    setHistoryItems([]);
+    saveHistoryToCookie([]);
+  }, []);
+
+  const restoreHistoryItem = useCallback((item: GenerationHistoryItem) => {
+    setGeneration({
+      status: 'success',
+      result: {
+        created: Math.floor(item.createdAt / 1000),
+        data: [
+          {
+            url: item.videoUrl,
+            revised_prompt: item.revisedPrompt || item.prompt,
+          },
+        ],
+      },
+    });
+  }, []);
+
   const handleGenerate = useCallback(async () => {
     if (!prompt.trim() && images.length === 0) return;
     if (generation.status === 'generating') return;
 
+    void ensureNotificationPermission();
     setGeneration({
       status: 'generating',
       progress: '正在提交视频生成请求...',
@@ -102,7 +218,23 @@ export default function App() {
       );
 
       if (result.data && result.data.length > 0 && result.data[0].url) {
+        const historyItem: GenerationHistoryItem = {
+          id: `history_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+          createdAt: Date.now(),
+          model,
+          ratio,
+          duration,
+          prompt,
+          revisedPrompt: result.data[0].revised_prompt || prompt,
+          videoUrl: result.data[0].url,
+        };
+
+        appendHistory(historyItem);
         setGeneration({ status: 'success', result });
+        notifyByBrowser(
+          'Seedance 视频已生成',
+          '生成已完成，回到页面即可预览和下载。'
+        );
       } else {
         setGeneration({
           status: 'error',
@@ -110,12 +242,25 @@ export default function App() {
         });
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : '未知错误';
       setGeneration({
         status: 'error',
-        error: error instanceof Error ? error.message : '未知错误',
+        error: message,
       });
+      notifyByBrowser('Seedance 生成失败', message);
     }
-  }, [prompt, images, model, ratio, duration, sessionId, generation.status]);
+  }, [
+    prompt,
+    images,
+    model,
+    ratio,
+    duration,
+    sessionId,
+    generation.status,
+    appendHistory,
+    ensureNotificationPermission,
+    notifyByBrowser,
+  ]);
 
   const handleReset = () => {
     setPrompt('');
@@ -391,6 +536,36 @@ export default function App() {
 
           {/* ── Generate Section ── */}
           <div className="pb-6 md:pb-4">
+            <div className="mb-4 rounded-xl border border-gray-800 bg-[#161824] p-3">
+              {notificationState === 'granted' ? (
+                <p className="text-xs text-green-300">
+                  已开启通知提醒：视频生成成功或失败时会自动通知，你可以切到其他页面处理别的事情。
+                </p>
+              ) : notificationState === 'default' ? (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-gray-300">
+                    生成时间较长，建议开启浏览器通知，成功/失败会自动提醒。
+                  </p>
+                  <button
+                    onClick={() => {
+                      void ensureNotificationPermission();
+                    }}
+                    className="shrink-0 px-3 py-1.5 text-xs rounded-lg bg-purple-600/20 text-purple-300 hover:bg-purple-600/30 transition-colors"
+                  >
+                    开启提醒
+                  </button>
+                </div>
+              ) : notificationState === 'denied' ? (
+                <p className="text-xs text-yellow-300">
+                  你已关闭通知权限。若需后台提醒，请在浏览器地址栏站点权限里开启“通知”。
+                </p>
+              ) : (
+                <p className="text-xs text-gray-400">
+                  当前浏览器不支持通知提醒，请保持页面打开查看进度。
+                </p>
+              )}
+            </div>
+
             {/* Progress */}
             {isGenerating && (
               <div className="mb-4">
@@ -400,6 +575,9 @@ export default function App() {
                 <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
                   <div className="h-full bg-gradient-to-r from-purple-600 to-indigo-600 rounded-full animate-progress" />
                 </div>
+                <p className="text-xs text-gray-500 mt-2">
+                  任务已在后台继续执行，无需一直停留在当前页面。
+                </p>
               </div>
             )}
 
@@ -442,6 +620,58 @@ export default function App() {
           error={generation.status === 'error' ? generation.error : undefined}
           progress={generation.progress}
         />
+
+        <div className="border-t border-gray-800 p-4 md:p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold text-gray-200">最近生成记录（本机 Cookie）</h3>
+            {historyItems.length > 0 && (
+              <button
+                onClick={clearHistory}
+                className="text-xs text-gray-400 hover:text-gray-200 transition-colors"
+              >
+                清空
+              </button>
+            )}
+          </div>
+
+          {historyItems.length === 0 ? (
+            <p className="text-xs text-gray-500">暂无历史记录。生成成功后会自动保存最近 5 条。</p>
+          ) : (
+            <div className="space-y-2">
+              {historyItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-xl border border-gray-800 bg-[#11131c] p-3"
+                >
+                  <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1">
+                    <span>
+                      {item.model} · {item.ratio} · {item.duration}秒
+                    </span>
+                    <span>{formatDateTime(item.createdAt)}</span>
+                  </div>
+                  <p className="text-xs text-gray-300 truncate">
+                    {item.prompt || item.revisedPrompt || '无提示词'}
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      onClick={() => restoreHistoryItem(item)}
+                      className="px-3 py-1.5 text-xs rounded-lg bg-purple-600/20 text-purple-300 hover:bg-purple-600/30 transition-colors"
+                    >
+                      查看
+                    </button>
+                    <a
+                      href={buildProxyVideoUrl(item.videoUrl)}
+                      download="seedance-video.mp4"
+                      className="px-3 py-1.5 text-xs rounded-lg bg-gray-700 text-gray-200 hover:bg-gray-600 transition-colors"
+                    >
+                      下载
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Settings Modal */}

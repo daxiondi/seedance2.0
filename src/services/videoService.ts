@@ -1,5 +1,17 @@
 import type { GenerateVideoRequest, VideoGenerationResponse } from '../types';
 
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(
+  /\/+$/,
+  ''
+);
+const POLL_TIMEOUT_MS = Number(
+  import.meta.env.VITE_TASK_POLL_TIMEOUT_MS || 45 * 60 * 1000
+);
+
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 export async function generateVideo(
   request: GenerateVideoRequest,
   onProgress?: (message: string) => void
@@ -20,7 +32,7 @@ export async function generateVideo(
 
   // 第1步: 提交任务
   onProgress?.('正在提交视频生成请求...');
-  const submitRes = await fetch('/api/generate-video', {
+  const submitRes = await fetch(apiUrl('/generate-video'), {
     method: 'POST',
     body: formData,
   });
@@ -38,14 +50,13 @@ export async function generateVideo(
   // 第2步: 轮询获取结果
   onProgress?.('已提交，等待AI生成视频...');
 
-  const maxPollTime = 25 * 60 * 1000; // 25 分钟
   const pollInterval = 3000; // 3 秒
   const startTime = Date.now();
 
-  while (Date.now() - startTime < maxPollTime) {
+  while (Date.now() - startTime < POLL_TIMEOUT_MS) {
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
-    const pollRes = await fetch(`/api/task/${taskId}`);
+    const pollRes = await fetch(apiUrl(`/task/${taskId}`));
     const pollData = await pollRes.json();
 
     if (pollData.status === 'done') {
@@ -66,5 +77,6 @@ export async function generateVideo(
     }
   }
 
-  throw new Error('视频生成超时，请稍后重试');
+  const timeoutMinutes = Math.ceil(POLL_TIMEOUT_MS / 60000);
+  throw new Error(`视频生成超时 (约${timeoutMinutes}分钟)，请稍后重试`);
 }

@@ -36,6 +36,17 @@ export interface VideoGenerationResponse {
   }>;
 }
 
+export interface GenerationHistoryItem {
+  id: string;
+  createdAt: number;
+  model: ModelId;
+  ratio: AspectRatio;
+  duration: Duration;
+  prompt: string;
+  revisedPrompt: string;
+  videoUrl: string;
+}
+
 export type GenerationStatus = 'idle' | 'generating' | 'success' | 'error';
 
 export interface GenerationState {

@@ -2,14 +2,10 @@ import { chromium } from 'playwright-core';
 
 const SESSION_IDLE_TIMEOUT = 10 * 60 * 1000; // 10 minutes
 const BDMS_READY_TIMEOUT = 30000; // 30 seconds
+const JIMENG_GENERATE_PAGE_URL =
+  'https://jimeng.jianying.com/ai-tool/video/generate';
 
-const BLOCKED_RESOURCE_TYPES = ['image', 'font', 'stylesheet', 'media'];
-const SCRIPT_WHITELIST_DOMAINS = [
-  'vlabstatic.com',
-  'bytescm.com',
-  'jianying.com',
-  'byteimg.com',
-];
+const BLOCKED_RESOURCE_TYPES = ['image', 'font', 'media'];
 
 class BrowserService {
   constructor() {
@@ -41,13 +37,7 @@ class BrowserService {
     const existing = this.sessions.get(sessionId);
     if (existing) {
       existing.lastUsed = Date.now();
-      if (existing.idleTimer) {
-        clearTimeout(existing.idleTimer);
-      }
-      existing.idleTimer = setTimeout(
-        () => this.closeSession(sessionId),
-        SESSION_IDLE_TIMEOUT
-      );
+      this.resetIdleTimer(sessionId, existing);
       return existing;
     }
 
@@ -73,17 +63,9 @@ class BrowserService {
     await context.route('**/*', (route) => {
       const request = route.request();
       const resourceType = request.resourceType();
-      const url = request.url();
 
       if (BLOCKED_RESOURCE_TYPES.includes(resourceType)) {
         return route.abort();
-      }
-
-      if (resourceType === 'script') {
-        const isWhitelisted = SCRIPT_WHITELIST_DOMAINS.some((domain) =>
-          url.includes(domain)
-        );
-        if (!isWhitelisted) return route.abort();
       }
 
       return route.continue();
@@ -91,10 +73,12 @@ class BrowserService {
 
     const page = await context.newPage();
 
-    console.log(`[browser] 正在导航到 jimeng.jianying.com (session: ${sessionId.substring(0, 8)}...)`);
-    await page.goto('https://jimeng.jianying.com', {
+    console.log(
+      `[browser] 正在导航到即梦生成页 (session: ${sessionId.substring(0, 8)}...)`
+    );
+    await page.goto(JIMENG_GENERATE_PAGE_URL, {
       waitUntil: 'domcontentloaded',
-      timeout: 30000,
+      timeout: 45000,
     });
 
     // Wait for bdms SDK to load
@@ -118,15 +102,23 @@ class BrowserService {
       context,
       page,
       lastUsed: Date.now(),
-      idleTimer: setTimeout(
-        () => this.closeSession(sessionId),
-        SESSION_IDLE_TIMEOUT
-      ),
+      idleTimer: null,
     };
+    this.resetIdleTimer(sessionId, session);
 
     this.sessions.set(sessionId, session);
     console.log(`[browser] 会话已创建 (session: ${sessionId.substring(0, 8)}...)`);
     return session;
+  }
+
+  resetIdleTimer(sessionId, session) {
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
+    }
+    session.idleTimer = setTimeout(
+      () => this.closeSession(sessionId),
+      SESSION_IDLE_TIMEOUT
+    );
   }
 
   async closeSession(sessionId) {
@@ -167,6 +159,11 @@ class BrowserService {
     );
 
     return result;
+  }
+
+  async refreshSession(sessionId, webId, userId) {
+    await this.closeSession(sessionId);
+    return this.getSession(sessionId, webId, userId);
   }
 
   async close() {

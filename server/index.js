@@ -479,6 +479,14 @@ async function platformRequest(
         // API 业务错误不重试，直接抛出
         const errMsg = data.errmsg || String(data.ret);
         const retCode = String(data.ret);
+        if (retCode === '1015' && String(errMsg).toLowerCase().includes('login')) {
+          throw Object.assign(
+            new Error(
+              `${platformConfig.name}登录校验失败：请先在${platformConfig.baseUrl}登录并完成验证，然后在设置里粘贴整段 Cookie（建议直接粘贴请求头 Cookie，至少包含 sessionid/sid_tt/uid_tt 等关键字段）`
+            ),
+            { isApiError: true }
+          );
+        }
         if (retCode === '5000')
           throw new Error(
             `${platformConfig.name}积分不足，请前往${platformConfig.name}官网领取积分`
@@ -554,20 +562,51 @@ async function platformRequestViaBrowser(
     fetchOptions.body = options.body;
   }
 
-  const result = await browserService.fetch(
-    sessionId,
-    WEB_ID,
-    '',
-    fullUrl.toString(),
-    fetchOptions,
-    platformConfig,
-    authCookieHeader
-  );
+  let result = null;
+  try {
+    result = await browserService.fetch(
+      sessionId,
+      WEB_ID,
+      '',
+      fullUrl.toString(),
+      fetchOptions,
+      platformConfig,
+      authCookieHeader
+    );
+  } catch (err) {
+    const msg = String(err?.message || '');
+    if (msg.includes('Execution context was destroyed')) {
+      // 页面发生跳转时 evaluate 会被销毁，刷新会话后重试一次
+      await browserService.refreshSession(
+        sessionId,
+        WEB_ID,
+        '',
+        platformConfig,
+        authCookieHeader
+      );
+      result = await browserService.fetch(
+        sessionId,
+        WEB_ID,
+        '',
+        fullUrl.toString(),
+        fetchOptions,
+        platformConfig,
+        authCookieHeader
+      );
+    } else {
+      throw err;
+    }
+  }
 
   if (result?.ret !== undefined) {
     if (String(result.ret) === '0') return result.data;
     const retCode = String(result.ret);
     const errMsg = result.errmsg || retCode;
+    if (retCode === '1015' && String(errMsg).toLowerCase().includes('login')) {
+      throw new Error(
+        `${platformConfig.name}登录校验失败：请先在${platformConfig.baseUrl}登录并完成验证，然后在设置里粘贴整段 Cookie（建议直接粘贴请求头 Cookie，至少包含 sessionid/sid_tt/uid_tt 等关键字段）`
+      );
+    }
     if (retCode === '5000') {
       throw new Error(
         `${platformConfig.name}积分不足，请前往${platformConfig.name}官网领取积分`
@@ -966,6 +1005,7 @@ async function generateXyqAgentVideo(
       authCookieHeader
     );
   } catch (err) {
+    if (String(err?.message || '').includes('登录校验失败')) throw err;
     console.log(`[${taskId}] 获取 user/info 失败: ${err.message}`);
   }
 
@@ -980,6 +1020,7 @@ async function generateXyqAgentVideo(
       authCookieHeader
     );
   } catch (err) {
+    if (String(err?.message || '').includes('登录校验失败')) throw err;
     console.log(`[${taskId}] 获取 workspace 信息失败: ${err.message}`);
   }
 

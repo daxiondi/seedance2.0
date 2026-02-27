@@ -155,7 +155,7 @@ export default function SettingsModal({
             </div>
             <p className="text-xs text-gray-500 mt-1">
               {currentPlatform === 'xyq'
-                ? '可粘贴 sessionid_pippitcn_web / sid_tt_pippitcn_web 的值，或整段 Cookie（后端会自动提取）'
+                ? '建议直接粘贴整段 Cookie（后端会自动提取）。仅填 sessionid/sid_tt 可能不足，需要包含 uid_tt 等关键字段'
                 : `从 ${currentPlatformInfo.domain} 的 Cookie 中获取 sessionid`}
             </p>
             <p className="text-xs text-gray-600 mt-1">

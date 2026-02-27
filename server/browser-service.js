@@ -2,8 +2,6 @@ import { chromium } from 'playwright-core';
 
 const SESSION_IDLE_TIMEOUT = 10 * 60 * 1000; // 10 minutes
 const BDMS_READY_TIMEOUT = 30000; // 30 seconds
-const JIMENG_GENERATE_PAGE_URL =
-  'https://jimeng.jianying.com/ai-tool/video/generate';
 
 const BLOCKED_RESOURCE_TYPES = ['image', 'font', 'media'];
 
@@ -33,11 +31,16 @@ class BrowserService {
     return this.browser;
   }
 
-  async getSession(sessionId, webId, userId) {
-    const existing = this.sessions.get(sessionId);
+  getSessionCacheKey(sessionId, platformKey) {
+    return `${platformKey}:${sessionId}`;
+  }
+
+  async getSession(sessionId, webId, userId, platformConfig) {
+    const cacheKey = this.getSessionCacheKey(sessionId, platformConfig.key);
+    const existing = this.sessions.get(cacheKey);
     if (existing) {
       existing.lastUsed = Date.now();
-      this.resetIdleTimer(sessionId, existing);
+      this.resetIdleTimer(cacheKey, existing);
       return existing;
     }
 
@@ -48,14 +51,15 @@ class BrowserService {
     });
 
     // Inject cookies
+    const cookieDomain = platformConfig.cookieDomain || '.jianying.com';
     const cookies = [
-      { name: '_tea_web_id', value: String(webId), domain: '.jianying.com', path: '/' },
-      { name: 'is_staff_user', value: 'false', domain: '.jianying.com', path: '/' },
-      { name: 'store-region', value: 'cn-gd', domain: '.jianying.com', path: '/' },
-      { name: 'uid_tt', value: String(userId), domain: '.jianying.com', path: '/' },
-      { name: 'sid_tt', value: sessionId, domain: '.jianying.com', path: '/' },
-      { name: 'sessionid', value: sessionId, domain: '.jianying.com', path: '/' },
-      { name: 'sessionid_ss', value: sessionId, domain: '.jianying.com', path: '/' },
+      { name: '_tea_web_id', value: String(webId), domain: cookieDomain, path: '/' },
+      { name: 'is_staff_user', value: 'false', domain: cookieDomain, path: '/' },
+      { name: 'store-region', value: 'cn-gd', domain: cookieDomain, path: '/' },
+      { name: 'uid_tt', value: String(userId), domain: cookieDomain, path: '/' },
+      { name: 'sid_tt', value: sessionId, domain: cookieDomain, path: '/' },
+      { name: 'sessionid', value: sessionId, domain: cookieDomain, path: '/' },
+      { name: 'sessionid_ss', value: sessionId, domain: cookieDomain, path: '/' },
     ];
     await context.addCookies(cookies);
 
@@ -74,9 +78,9 @@ class BrowserService {
     const page = await context.newPage();
 
     console.log(
-      `[browser] 正在导航到即梦生成页 (session: ${sessionId.substring(0, 8)}...)`
+      `[browser][${platformConfig.name}] 正在导航到生成页 (session: ${sessionId.substring(0, 8)}...)`
     );
-    await page.goto(JIMENG_GENERATE_PAGE_URL, {
+    await page.goto(platformConfig.generatePageUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 45000,
     });
@@ -101,28 +105,33 @@ class BrowserService {
     const session = {
       context,
       page,
+      platformKey: platformConfig.key,
+      platformName: platformConfig.name,
+      sessionId,
       lastUsed: Date.now(),
       idleTimer: null,
     };
-    this.resetIdleTimer(sessionId, session);
+    this.resetIdleTimer(cacheKey, session);
 
-    this.sessions.set(sessionId, session);
-    console.log(`[browser] 会话已创建 (session: ${sessionId.substring(0, 8)}...)`);
+    this.sessions.set(cacheKey, session);
+    console.log(
+      `[browser][${platformConfig.name}] 会话已创建 (session: ${sessionId.substring(0, 8)}...)`
+    );
     return session;
   }
 
-  resetIdleTimer(sessionId, session) {
+  resetIdleTimer(cacheKey, session) {
     if (session.idleTimer) {
       clearTimeout(session.idleTimer);
     }
     session.idleTimer = setTimeout(
-      () => this.closeSession(sessionId),
+      () => this.closeSessionByKey(cacheKey),
       SESSION_IDLE_TIMEOUT
     );
   }
 
-  async closeSession(sessionId) {
-    const session = this.sessions.get(sessionId);
+  async closeSessionByKey(cacheKey) {
+    const session = this.sessions.get(cacheKey);
     if (!session) return;
 
     if (session.idleTimer) {
@@ -135,12 +144,24 @@ class BrowserService {
       // ignore
     }
 
-    this.sessions.delete(sessionId);
-    console.log(`[browser] 会话已关闭 (session: ${sessionId.substring(0, 8)}...)`);
+    this.sessions.delete(cacheKey);
+    console.log(
+      `[browser][${session.platformName}] 会话已关闭 (session: ${session.sessionId.substring(0, 8)}...)`
+    );
   }
 
-  async fetch(sessionId, webId, userId, url, options = {}) {
-    const session = await this.getSession(sessionId, webId, userId);
+  async closeSession(sessionId, platformConfig) {
+    const cacheKey = this.getSessionCacheKey(sessionId, platformConfig.key);
+    await this.closeSessionByKey(cacheKey);
+  }
+
+  async fetch(sessionId, webId, userId, url, options = {}, platformConfig) {
+    const session = await this.getSession(
+      sessionId,
+      webId,
+      userId,
+      platformConfig
+    );
     const { method = 'GET', headers = {}, body } = options;
 
     console.log(`[browser] 通过浏览器代理请求: ${method} ${url.substring(0, 80)}...`);
@@ -161,14 +182,14 @@ class BrowserService {
     return result;
   }
 
-  async refreshSession(sessionId, webId, userId) {
-    await this.closeSession(sessionId);
-    return this.getSession(sessionId, webId, userId);
+  async refreshSession(sessionId, webId, userId, platformConfig) {
+    await this.closeSession(sessionId, platformConfig);
+    return this.getSession(sessionId, webId, userId, platformConfig);
   }
 
   async close() {
-    for (const [sessionId] of this.sessions) {
-      await this.closeSession(sessionId);
+    for (const [cacheKey] of this.sessions) {
+      await this.closeSessionByKey(cacheKey);
     }
 
     if (this.browser) {

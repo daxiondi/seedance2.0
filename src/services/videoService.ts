@@ -21,6 +21,9 @@ export async function generateVideo(
   formData.append('model', request.model);
   formData.append('ratio', request.ratio);
   formData.append('duration', String(request.duration));
+  if (request.platform) {
+    formData.append('platform', request.platform);
+  }
 
   if (request.sessionId) {
     formData.append('sessionId', request.sessionId);

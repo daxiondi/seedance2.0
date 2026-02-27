@@ -3,11 +3,19 @@ export type AspectRatio = '21:9' | '16:9' | '4:3' | '1:1' | '3:4' | '9:16';
 export type Duration = 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15;
 
 export type ModelId = 'seedance-2.0' | 'seedance-2.0-fast';
+export type PlatformId = 'jimeng' | 'xyq';
 
 export interface ModelOption {
   value: ModelId;
   label: string;
   description: string;
+}
+
+export interface PlatformOption {
+  value: PlatformId;
+  label: string;
+  description: string;
+  domain: string;
 }
 
 export type ReferenceMode = '全能参考' | '首帧参考' | '尾帧参考';
@@ -25,6 +33,7 @@ export interface GenerateVideoRequest {
   ratio: AspectRatio;
   duration: Duration;
   files: File[];
+  platform?: PlatformId;
   sessionId?: string;
 }
 
@@ -39,6 +48,7 @@ export interface VideoGenerationResponse {
 export interface GenerationHistoryItem {
   id: string;
   createdAt: number;
+  platform: PlatformId;
   model: ModelId;
   ratio: AspectRatio;
   duration: Duration;
@@ -88,3 +98,23 @@ export const MODEL_OPTIONS: ModelOption[] = [
     description: '精简时长，音视频图均可参考(暂不支持真人入镜)',
   },
 ];
+
+export const PLATFORM_OPTIONS: PlatformOption[] = [
+  {
+    value: 'jimeng',
+    label: '即梦',
+    description: '剪映即梦平台',
+    domain: 'jimeng.jianying.com',
+  },
+  {
+    value: 'xyq',
+    label: '小云雀',
+    description: '剪映小云雀平台',
+    domain: 'xyq.jianying.com',
+  },
+];
+
+export const PLATFORM_LABEL_MAP: Record<PlatformId, string> = {
+  jimeng: '即梦',
+  xyq: '小云雀',
+};

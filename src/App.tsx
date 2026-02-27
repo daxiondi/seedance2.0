@@ -3,12 +3,19 @@ import type {
   AspectRatio,
   Duration,
   ModelId,
+  PlatformId,
   ReferenceMode,
   UploadedImage,
   GenerationState,
   GenerationHistoryItem,
 } from './types';
-import { RATIO_OPTIONS, DURATION_OPTIONS, REFERENCE_MODES, MODEL_OPTIONS } from './types';
+import {
+  RATIO_OPTIONS,
+  DURATION_OPTIONS,
+  REFERENCE_MODES,
+  MODEL_OPTIONS,
+  PLATFORM_LABEL_MAP,
+} from './types';
 import { generateVideo } from './services/videoService';
 import VideoPlayer from './components/VideoPlayer';
 import SettingsModal, { loadSettings } from './components/SettingsModal';
@@ -18,6 +25,11 @@ let nextId = 0;
 const HISTORY_COOKIE_KEY = 'seedance_history_v1';
 const HISTORY_COOKIE_DAYS = 30;
 const MAX_HISTORY_ITEMS = 5;
+const DEFAULT_PLATFORM: PlatformId = 'jimeng';
+const EMPTY_SESSIONS: Record<PlatformId, string> = {
+  jimeng: '',
+  xyq: '',
+};
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(
   /\/+$/,
   ''
@@ -29,6 +41,13 @@ function getNotificationState(): NotificationState {
     return 'unsupported';
   }
   return Notification.permission;
+}
+
+function getEnvSessionId(platform: PlatformId): string {
+  if (platform === 'xyq') {
+    return String(import.meta.env.VITE_DEFAULT_XYQ_SESSION_ID || '').trim();
+  }
+  return String(import.meta.env.VITE_DEFAULT_SESSION_ID || '').trim();
 }
 
 function getCookie(name: string): string | null {
@@ -48,14 +67,29 @@ function loadHistoryFromCookie(): GenerationHistoryItem[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is GenerationHistoryItem => {
-      return (
-        item &&
-        typeof item.id === 'string' &&
-        typeof item.createdAt === 'number' &&
-        typeof item.videoUrl === 'string'
-      );
-    });
+    return parsed
+      .map((item): GenerationHistoryItem | null => {
+        if (
+          !item ||
+          typeof item.id !== 'string' ||
+          typeof item.createdAt !== 'number' ||
+          typeof item.videoUrl !== 'string'
+        ) {
+          return null;
+        }
+
+        const rawPlatform = item.platform;
+        const platform: PlatformId =
+          rawPlatform === 'xyq' || rawPlatform === 'jimeng'
+            ? rawPlatform
+            : DEFAULT_PLATFORM;
+
+        return {
+          ...item,
+          platform,
+        };
+      })
+      .filter((item): item is GenerationHistoryItem => item !== null);
   } catch {
     return [];
   }
@@ -69,8 +103,11 @@ function formatDateTime(timestamp: number): string {
   return new Date(timestamp).toLocaleString('zh-CN', { hour12: false });
 }
 
-function buildProxyVideoUrl(rawVideoUrl: string): string {
-  return `${API_BASE}/video-proxy?url=${encodeURIComponent(rawVideoUrl)}`;
+function buildProxyVideoUrl(
+  rawVideoUrl: string,
+  platform: PlatformId = DEFAULT_PLATFORM
+): string {
+  return `${API_BASE}/video-proxy?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(rawVideoUrl)}`;
 }
 
 export default function App() {
@@ -84,7 +121,10 @@ export default function App() {
     status: 'idle',
   });
   const [historyItems, setHistoryItems] = useState<GenerationHistoryItem[]>([]);
-  const [sessionId, setSessionId] = useState('');
+  const [platform, setPlatform] = useState<PlatformId>(DEFAULT_PLATFORM);
+  const [sessions, setSessions] =
+    useState<Record<PlatformId, string>>(EMPTY_SESSIONS);
+  const [resultPlatform, setResultPlatform] = useState<PlatformId>(DEFAULT_PLATFORM);
   const [showSettings, setShowSettings] = useState(false);
   const [notificationState, setNotificationState] =
     useState<NotificationState>('unsupported');
@@ -93,11 +133,16 @@ export default function App() {
 
   useEffect(() => {
     const saved = loadSettings();
-    if (saved.sessionId) setSessionId(saved.sessionId);
+    setPlatform(saved.platform);
+    setSessions({
+      ...EMPTY_SESSIONS,
+      ...saved.sessions,
+    });
     setHistoryItems(loadHistoryFromCookie());
 
-    const envSessionId = import.meta.env.VITE_DEFAULT_SESSION_ID;
-    if (!saved.sessionId && !envSessionId) {
+    const initialSession =
+      saved.sessions[saved.platform] || getEnvSessionId(saved.platform);
+    if (!initialSession) {
       setShowSettings(true);
     }
   }, []);
@@ -178,6 +223,7 @@ export default function App() {
   }, []);
 
   const restoreHistoryItem = useCallback((item: GenerationHistoryItem) => {
+    setResultPlatform(item.platform);
     setGeneration({
       status: 'success',
       result: {
@@ -195,6 +241,7 @@ export default function App() {
   const handleGenerate = useCallback(async () => {
     if (!prompt.trim() && images.length === 0) return;
     if (generation.status === 'generating') return;
+    const activeSessionId = sessions[platform] || getEnvSessionId(platform);
 
     void ensureNotificationPermission();
     setGeneration({
@@ -210,7 +257,8 @@ export default function App() {
           ratio,
           duration,
           files: images.map((img) => img.file),
-          sessionId: sessionId || undefined,
+          platform,
+          sessionId: activeSessionId || undefined,
         },
         (progress) => {
           setGeneration((prev) => ({ ...prev, progress }));
@@ -221,6 +269,7 @@ export default function App() {
         const historyItem: GenerationHistoryItem = {
           id: `history_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
           createdAt: Date.now(),
+          platform,
           model,
           ratio,
           duration,
@@ -230,6 +279,7 @@ export default function App() {
         };
 
         appendHistory(historyItem);
+        setResultPlatform(platform);
         setGeneration({ status: 'success', result });
         notifyByBrowser(
           'Seedance 视频已生成',
@@ -255,7 +305,8 @@ export default function App() {
     model,
     ratio,
     duration,
-    sessionId,
+    platform,
+    sessions,
     generation.status,
     appendHistory,
     ensureNotificationPermission,
@@ -280,12 +331,16 @@ export default function App() {
 
   const isGenerating = generation.status === 'generating';
   const canGenerate = (prompt.trim() || images.length > 0) && !isGenerating;
+  const selectedPlatformLabel = PLATFORM_LABEL_MAP[platform];
 
   return (
     <div className="h-screen flex flex-col md:flex-row overflow-hidden bg-[#0f111a] text-white">
       {/* Mobile Header */}
       <div className="md:hidden sticky top-0 z-40 bg-[#0f111a]/95 backdrop-blur-sm px-4 py-3 flex items-center justify-between border-b border-gray-800">
-        <h1 className="text-lg font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'}</h1>
+        <h1 className="text-lg font-bold">
+          {(MODEL_OPTIONS.find((m) => m.value === model)?.label || 'Seedance 2.0') +
+            ` · ${selectedPlatformLabel}`}
+        </h1>
         <button
           onClick={() => setShowSettings(true)}
           className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
@@ -298,7 +353,10 @@ export default function App() {
       <div className="flex-1 md:w-[520px] md:max-w-[520px] md:flex-none md:border-r border-gray-800 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-[#0f111a]">
         {/* Desktop header */}
         <div className="hidden md:flex items-center justify-between mb-6">
-          <h2 className="text-xl font-bold">{MODEL_OPTIONS.find(m => m.value === model)?.label || 'Seedance 2.0'} 视频配置</h2>
+          <h2 className="text-xl font-bold">
+            {(MODEL_OPTIONS.find((m) => m.value === model)?.label || 'Seedance 2.0') +
+              ` · ${selectedPlatformLabel}`} 视频配置
+          </h2>
           <button
             onClick={() => setShowSettings(true)}
             className="p-2 rounded-lg hover:bg-gray-800 transition-colors"
@@ -615,6 +673,7 @@ export default function App() {
       <div className="flex-1 bg-[#090a0f] overflow-y-auto flex flex-col">
         <VideoPlayer
           videoUrl={videoUrl}
+          platform={resultPlatform}
           revisedPrompt={revisedPrompt}
           isLoading={isGenerating}
           error={generation.status === 'error' ? generation.error : undefined}
@@ -645,7 +704,8 @@ export default function App() {
                 >
                   <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1">
                     <span>
-                      {item.model} · {item.ratio} · {item.duration}秒
+                      {PLATFORM_LABEL_MAP[item.platform]} · {item.model} · {item.ratio} ·{' '}
+                      {item.duration}秒
                     </span>
                     <span>{formatDateTime(item.createdAt)}</span>
                   </div>
@@ -660,7 +720,7 @@ export default function App() {
                       查看
                     </button>
                     <a
-                      href={buildProxyVideoUrl(item.videoUrl)}
+                      href={buildProxyVideoUrl(item.videoUrl, item.platform)}
                       download="seedance-video.mp4"
                       className="px-3 py-1.5 text-xs rounded-lg bg-gray-700 text-gray-200 hover:bg-gray-600 transition-colors"
                     >
@@ -678,8 +738,11 @@ export default function App() {
       <SettingsModal
         isOpen={showSettings}
         onClose={() => setShowSettings(false)}
-        sessionId={sessionId}
-        onSessionIdChange={setSessionId}
+        settings={{ platform, sessions }}
+        onSave={(nextSettings) => {
+          setPlatform(nextSettings.platform);
+          setSessions(nextSettings.sessions);
+        }}
       />
     </div>
   );

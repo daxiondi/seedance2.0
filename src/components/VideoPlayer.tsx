@@ -1,19 +1,22 @@
 import { SpinnerIcon, FilmIcon, DownloadIcon } from './Icons';
+import type { PlatformId } from '../types';
 
 interface VideoPlayerProps {
   videoUrl: string | null;
+  platform: PlatformId;
   revisedPrompt?: string;
   isLoading: boolean;
   error?: string;
   progress?: string;
 }
 
-function proxyUrl(url: string): string {
-  return `/api/video-proxy?url=${encodeURIComponent(url)}`;
+function proxyUrl(url: string, platform: PlatformId): string {
+  return `/api/video-proxy?platform=${encodeURIComponent(platform)}&url=${encodeURIComponent(url)}`;
 }
 
 export default function VideoPlayer({
   videoUrl,
+  platform,
   revisedPrompt,
   isLoading,
   error,
@@ -52,7 +55,7 @@ export default function VideoPlayer({
   }
 
   if (videoUrl) {
-    const proxied = proxyUrl(videoUrl);
+    const proxied = proxyUrl(videoUrl, platform);
 
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-4 p-4 md:p-8">

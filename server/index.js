@@ -11,6 +11,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
 const DEFAULT_SESSION_ID = process.env.VITE_DEFAULT_SESSION_ID || '';
+const DEFAULT_XYQ_SESSION_ID = process.env.VITE_DEFAULT_XYQ_SESSION_ID || '';
 const configuredTimeoutMs = Number(process.env.VIDEO_GENERATION_TIMEOUT_MS);
 const VIDEO_GENERATION_TIMEOUT_MS =
   Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
@@ -28,7 +29,23 @@ const upload = multer({
 // ============================================================
 // 常量定义
 // ============================================================
-const JIMENG_BASE_URL = 'https://jimeng.jianying.com';
+const PLATFORM_CONFIGS = {
+  jimeng: {
+    key: 'jimeng',
+    name: '即梦',
+    baseUrl: 'https://jimeng.jianying.com',
+    generatePageUrl: 'https://jimeng.jianying.com/ai-tool/video/generate',
+    cookieDomain: '.jianying.com',
+  },
+  xyq: {
+    key: 'xyq',
+    name: '小云雀',
+    baseUrl: 'https://xyq.jianying.com',
+    generatePageUrl: 'https://xyq.jianying.com/home?tab_name=home',
+    cookieDomain: '.jianying.com',
+  },
+};
+const DEFAULT_PLATFORM_KEY = 'jimeng';
 const DEFAULT_ASSISTANT_ID = 513695;
 const VERSION_CODE = '8.4.0';
 const PLATFORM_CODE = '7';
@@ -45,10 +62,8 @@ const FAKE_HEADERS = {
   Appvr: VERSION_CODE,
   Lan: 'zh-Hans',
   Loc: 'cn',
-  Origin: 'https://jimeng.jianying.com',
   Pragma: 'no-cache',
   Priority: 'u=1, i',
-  Referer: 'https://jimeng.jianying.com',
   Pf: PLATFORM_CODE,
   'Sec-Ch-Ua':
     '"Google Chrome";v="132", "Chromium";v="132", "Not_A Brand";v="8"',
@@ -60,6 +75,21 @@ const FAKE_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
 };
+
+function parsePlatform(rawPlatform) {
+  if (typeof rawPlatform !== 'string' || !rawPlatform.trim()) {
+    return PLATFORM_CONFIGS[DEFAULT_PLATFORM_KEY];
+  }
+  return PLATFORM_CONFIGS[rawPlatform.trim()] || null;
+}
+
+function resolveSessionId(platformKey, requestSessionId) {
+  if (requestSessionId) return requestSessionId;
+  if (platformKey === 'xyq') {
+    return DEFAULT_XYQ_SESSION_ID || DEFAULT_SESSION_ID;
+  }
+  return DEFAULT_SESSION_ID;
+}
 
 // 模型映射
 const MODEL_MAP = {
@@ -142,11 +172,17 @@ function generateSign(uri) {
 }
 
 // ============================================================
-// 即梦 API 请求函数
+// 平台 API 请求函数
 // ============================================================
-async function jimengRequest(method, uri, sessionId, options = {}) {
+async function platformRequest(
+  method,
+  uri,
+  sessionId,
+  platformConfig,
+  options = {}
+) {
   const { deviceTime, sign } = generateSign(uri);
-  const fullUrl = new URL(`${JIMENG_BASE_URL}${uri}`);
+  const fullUrl = new URL(`${platformConfig.baseUrl}${uri}`);
 
   const defaultParams = {
     aid: DEFAULT_ASSISTANT_ID,
@@ -166,6 +202,8 @@ async function jimengRequest(method, uri, sessionId, options = {}) {
 
   const headers = {
     ...FAKE_HEADERS,
+    Origin: platformConfig.baseUrl,
+    Referer: platformConfig.baseUrl,
     Cookie: generateCookie(sessionId),
     'Device-Time': String(deviceTime),
     Sign: sign,
@@ -184,7 +222,7 @@ async function jimengRequest(method, uri, sessionId, options = {}) {
     try {
       if (attempt > 0) {
         await new Promise((r) => setTimeout(r, 1000 * attempt));
-        console.log(`  [jimeng] 重试 ${uri} (第${attempt}次)`);
+        console.log(`  [${platformConfig.key}] 重试 ${uri} (第${attempt}次)`);
       }
 
       const response = await fetch(fullUrl.toString(), {
@@ -199,9 +237,11 @@ async function jimengRequest(method, uri, sessionId, options = {}) {
         const errMsg = data.errmsg || String(data.ret);
         const retCode = String(data.ret);
         if (retCode === '5000')
-          throw new Error('即梦积分不足，请前往即梦官网领取积分');
+          throw new Error(
+            `${platformConfig.name}积分不足，请前往${platformConfig.name}官网领取积分`
+          );
         throw Object.assign(
-          new Error(`即梦API错误 (ret=${retCode}): ${errMsg}`),
+          new Error(`${platformConfig.name}API错误 (ret=${retCode}): ${errMsg}`),
           { isApiError: true }
         );
       }
@@ -212,7 +252,7 @@ async function jimengRequest(method, uri, sessionId, options = {}) {
       if (err.isApiError) throw err;
       if (attempt === 3) throw err;
       console.log(
-        `  [jimeng] 请求 ${uri} 失败 (第${attempt + 1}次): ${err.message}`
+        `  [${platformConfig.key}] 请求 ${uri} 失败 (第${attempt + 1}次): ${err.message}`
       );
     }
   }
@@ -336,14 +376,15 @@ function calculateCRC32(buffer) {
 // ============================================================
 // 图片上传 (4步 ImageX 流程)
 // ============================================================
-async function uploadImageBuffer(buffer, sessionId) {
+async function uploadImageBuffer(buffer, sessionId, platformConfig) {
   console.log(`  [upload] 开始上传图片, 大小: ${buffer.length} 字节`);
 
   // 第1步: 获取上传令牌
-  const tokenResult = await jimengRequest(
+  const tokenResult = await platformRequest(
     'post',
     '/mweb/v1/get_upload_token',
     sessionId,
+    platformConfig,
     { data: { scene: 2 } }
   );
 
@@ -386,8 +427,8 @@ async function uploadImageBuffer(buffer, sessionId) {
     headers: {
       accept: '*/*',
       authorization: authorization,
-      origin: 'https://jimeng.jianying.com',
-      referer: 'https://jimeng.jianying.com/ai-tool/video/generate',
+      origin: platformConfig.baseUrl,
+      referer: platformConfig.generatePageUrl,
       'user-agent': FAKE_HEADERS['User-Agent'],
       'x-amz-date': timestamp,
       'x-amz-security-token': session_token,
@@ -422,8 +463,8 @@ async function uploadImageBuffer(buffer, sessionId) {
       'Content-CRC32': crc32,
       'Content-Disposition': 'attachment; filename="undefined"',
       'Content-Type': 'application/octet-stream',
-      Origin: 'https://jimeng.jianying.com',
-      Referer: 'https://jimeng.jianying.com/ai-tool/video/generate',
+      Origin: platformConfig.baseUrl,
+      Referer: platformConfig.generatePageUrl,
       'User-Agent': FAKE_HEADERS['User-Agent'],
     },
     body: buffer,
@@ -469,8 +510,8 @@ async function uploadImageBuffer(buffer, sessionId) {
       accept: '*/*',
       authorization: commitAuth,
       'content-type': 'application/json',
-      origin: 'https://jimeng.jianying.com',
-      referer: 'https://jimeng.jianying.com/ai-tool/video/generate',
+      origin: platformConfig.baseUrl,
+      referer: platformConfig.generatePageUrl,
       'user-agent': FAKE_HEADERS['User-Agent'],
       'x-amz-date': commitTimestamp,
       'x-amz-security-token': session_token,
@@ -562,7 +603,15 @@ function buildMetaListFromPrompt(prompt, imageCount) {
 // ============================================================
 async function generateSeedanceVideo(
   taskId,
-  { prompt, ratio, duration, files, sessionId, model: requestModel }
+  {
+    prompt,
+    ratio,
+    duration,
+    files,
+    sessionId,
+    model: requestModel,
+    platformConfig,
+  }
 ) {
   const task = tasks.get(taskId);
   const modelKey = requestModel && MODEL_MAP[requestModel] ? requestModel : 'seedance-2.0';
@@ -574,7 +623,7 @@ async function generateSeedanceVideo(
   const { width, height } = resConfig;
 
   console.log(
-    `[${taskId}] ${modelKey}: ${width}x${height} (${ratio}) ${actualDuration}秒`
+    `[${taskId}] [${platformConfig.name}] ${modelKey}: ${width}x${height} (${ratio}) ${actualDuration}秒`
   );
 
   // 第1步: 上传图片
@@ -587,7 +636,11 @@ async function generateSeedanceVideo(
       `[${taskId}] 上传图片 ${i + 1}/${files.length}: ${files[i].originalname} (${(files[i].size / 1024).toFixed(1)}KB)`
     );
 
-    const imageUri = await uploadImageBuffer(files[i].buffer, sessionId);
+    const imageUri = await uploadImageBuffer(
+      files[i].buffer,
+      sessionId,
+      platformConfig
+    );
     uploadedImages.push({ uri: imageUri, width, height });
     console.log(`[${taskId}] 图片 ${i + 1} 上传成功`);
   }
@@ -667,7 +720,7 @@ async function generateSeedanceVideo(
     web_version: '7.5.0',
     aigc_features: 'app_lip_sync',
   });
-  const generateUrl = `${JIMENG_BASE_URL}/mweb/v1/aigc_draft/generate?${generateQueryParams}`;
+  const generateUrl = `${platformConfig.baseUrl}/mweb/v1/aigc_draft/generate?${generateQueryParams}`;
 
   const generateBody = {
     extend: {
@@ -761,7 +814,12 @@ async function generateSeedanceVideo(
     if (attempt > 0) {
       task.progress = '检测到安全校验，正在刷新会话后重试...';
       console.log(`[${taskId}] ret=4010，刷新浏览器会话并重试`);
-      await browserService.refreshSession(sessionId, WEB_ID, USER_ID);
+      await browserService.refreshSession(
+        sessionId,
+        WEB_ID,
+        USER_ID,
+        platformConfig
+      );
       await new Promise((r) => setTimeout(r, 1200));
     }
 
@@ -774,7 +832,8 @@ async function generateSeedanceVideo(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(generateBody),
-      }
+      },
+      platformConfig
     );
 
     if (String(generateResult?.ret) === '4010' && attempt === 0) {
@@ -787,13 +846,17 @@ async function generateSeedanceVideo(
   if (generateResult.ret !== undefined && String(generateResult.ret) !== '0') {
     const retCode = String(generateResult.ret);
     const errMsg = generateResult.errmsg || retCode;
-    if (retCode === '5000') throw new Error('即梦积分不足，请前往即梦官网领取积分');
-    if (retCode === '4010') {
+    if (retCode === '5000') {
       throw new Error(
-        '即梦API错误 (ret=4010): 触发安全校验。请先在即梦官网完成安全确认，然后更新最新 sessionid 再重试'
+        `${platformConfig.name}积分不足，请前往${platformConfig.name}官网领取积分`
       );
     }
-    throw new Error(`即梦API错误 (ret=${retCode}): ${errMsg}`);
+    if (retCode === '4010') {
+      throw new Error(
+        `${platformConfig.name}API错误 (ret=4010): 触发安全校验。请先在${platformConfig.name}官网完成安全确认，然后更新最新 sessionid 再重试`
+      );
+    }
+    throw new Error(`${platformConfig.name}API错误 (ret=${retCode}): ${errMsg}`);
   }
 
   const aigcData = generateResult.data?.aigc_data;
@@ -819,10 +882,11 @@ async function generateSeedanceVideo(
     if (elapsedMs >= VIDEO_GENERATION_TIMEOUT_MS) break;
 
     try {
-      const result = await jimengRequest(
+      const result = await platformRequest(
         'post',
         '/mweb/v1/get_history_by_ids',
         sessionId,
+        platformConfig,
         { data: { history_ids: [historyId] } }
       );
 
@@ -892,10 +956,11 @@ async function generateSeedanceVideo(
 
   if (itemId) {
     try {
-      const hqResult = await jimengRequest(
+      const hqResult = await platformRequest(
         'post',
         '/mweb/v1/get_local_item_list',
         sessionId,
+        platformConfig,
         {
           data: {
             item_id_list: [String(itemId)],
@@ -922,12 +987,9 @@ async function generateSeedanceVideo(
       // 正则匹配兜底
       const responseStr = JSON.stringify(hqResult);
       const urlMatch =
-        responseStr.match(
-          /https:\/\/v[0-9]+-dreamnia\.jimeng\.com\/[^"\s\\]+/
-        ) ||
-        responseStr.match(
-          /https:\/\/v[0-9]+-[^"\\]*\.jimeng\.com\/[^"\s\\]+/
-        );
+        responseStr.match(/https:\/\/v[0-9]+-dreamnia\.jimeng\.com\/[^"\s\\]+/) ||
+        responseStr.match(/https:\/\/v[0-9]+-[^"\\]*\.jimeng\.com\/[^"\s\\]+/) ||
+        responseStr.match(/https:\/\/v[0-9]+-[^"\\\/]+\/[^"\s\\]+/);
       if (urlMatch?.[0]) {
         console.log(`[${taskId}] 正则提取到高清视频URL`);
         return urlMatch[0];
@@ -961,15 +1023,19 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
   const startTime = Date.now();
 
   try {
-    const { prompt, ratio, duration, sessionId, model } = req.body;
+    const { prompt, ratio, duration, sessionId, model, platform: rawPlatform } = req.body;
     const files = req.files;
+    const platformConfig = parsePlatform(rawPlatform);
+    if (!platformConfig) {
+      return res.status(400).json({ error: '不支持的平台类型，仅支持 jimeng / xyq' });
+    }
 
     // 认证检查
-    const authToken = sessionId || DEFAULT_SESSION_ID;
+    const authToken = resolveSessionId(platformConfig.key, sessionId);
     if (!authToken) {
       return res
         .status(401)
-        .json({ error: '未配置 Session ID，请在设置中填写' });
+        .json({ error: `未配置 ${platformConfig.name} Session ID，请在设置中填写` });
     }
 
     // Seedance 2.0 需要至少一张图片
@@ -983,6 +1049,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     const taskId = createTaskId();
     const task = {
       id: taskId,
+      platform: platformConfig.key,
       status: 'processing',
       progress: '正在准备...',
       startTime,
@@ -992,6 +1059,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     tasks.set(taskId, task);
 
     console.log(`\n========== [${taskId}] 收到视频生成请求 ==========`);
+    console.log(`  platform: ${platformConfig.name} (${platformConfig.key})`);
     console.log(`  prompt: ${(prompt || '').substring(0, 80)}${(prompt || '').length > 80 ? '...' : ''}`);
     console.log(`  model: ${model || 'seedance-2.0'}, ratio: ${ratio || '4:3'}, duration: ${duration || 4}秒`);
     console.log(`  files: ${files.length}张`);
@@ -1012,6 +1080,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
       files,
       sessionId: authToken,
       model: model || 'seedance-2.0',
+      platformConfig,
     })
       .then((videoUrl) => {
         task.status = 'done';
@@ -1066,7 +1135,11 @@ app.get('/api/task/:taskId', (req, res) => {
 
 // GET /api/video-proxy - 代理视频流，绕过 CDN 跨域限制
 app.get('/api/video-proxy', async (req, res) => {
-  const videoUrl = req.query.url;
+  const rawVideoUrl = req.query.url;
+  const videoUrl = Array.isArray(rawVideoUrl) ? rawVideoUrl[0] : rawVideoUrl;
+  const platformConfig =
+    parsePlatform(Array.isArray(req.query.platform) ? req.query.platform[0] : req.query.platform) ||
+    PLATFORM_CONFIGS[DEFAULT_PLATFORM_KEY];
   if (!videoUrl) {
     return res.status(400).json({ error: '缺少 url 参数' });
   }
@@ -1077,7 +1150,7 @@ app.get('/api/video-proxy', async (req, res) => {
     const response = await fetch(videoUrl, {
       headers: {
         'User-Agent': FAKE_HEADERS['User-Agent'],
-        Referer: 'https://jimeng.jianying.com/',
+        Referer: `${platformConfig.baseUrl}/`,
       },
     });
 
@@ -1131,7 +1204,7 @@ app.use((err, _req, res, _next) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', mode: 'direct-jimeng-api' });
+  res.json({ status: 'ok', mode: 'direct-multi-platform-api' });
 });
 
 // 生产模式: 提供前端静态文件
@@ -1155,12 +1228,17 @@ process.on('SIGINT', () => {
 
 app.listen(PORT, () => {
   console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
-  console.log(`🔗 直连即梦 API (jimeng.jianying.com)`);
+  console.log(`🔗 多平台直连 API:`);
+  console.log(`   - 即梦: ${PLATFORM_CONFIGS.jimeng.baseUrl}`);
+  console.log(`   - 小云雀: ${PLATFORM_CONFIGS.xyq.baseUrl}`);
   console.log(
     `⏱️ 生成超时时间: ${Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 60000)} 分钟`
   );
   console.log(
-    `🔑 默认 Session ID: ${DEFAULT_SESSION_ID ? `已配置 (长度${DEFAULT_SESSION_ID.length})` : '未配置'}`
+    `🔑 默认即梦 Session ID: ${DEFAULT_SESSION_ID ? `已配置 (长度${DEFAULT_SESSION_ID.length})` : '未配置'}`
+  );
+  console.log(
+    `🔑 默认小云雀 Session ID: ${DEFAULT_XYQ_SESSION_ID ? `已配置 (长度${DEFAULT_XYQ_SESSION_ID.length})` : '未配置'}`
   );
   console.log(
     `📁 运行模式: ${process.env.NODE_ENV === 'production' ? '生产' : '开发'}\n`

@@ -1,39 +1,90 @@
 import { useState, useEffect } from 'react';
 import { CloseIcon, EyeIcon, EyeOffIcon } from './Icons';
+import type { PlatformId } from '../types';
+import { PLATFORM_OPTIONS } from '../types';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  sessionId: string;
-  onSessionIdChange: (id: string) => void;
+  settings: AppSettings;
+  onSave: (settings: AppSettings) => void;
 }
 
-const LS_SESSION_KEY = 'seedance_session_id';
+const LS_SESSION_KEY_LEGACY = 'seedance_session_id';
+const LS_PLATFORM_KEY = 'seedance_platform';
+const LS_SESSION_KEYS: Record<PlatformId, string> = {
+  jimeng: 'seedance_session_id_jimeng',
+  xyq: 'seedance_session_id_xyq',
+};
 
-export function loadSettings() {
+export interface AppSettings {
+  platform: PlatformId;
+  sessions: Record<PlatformId, string>;
+}
+
+export function loadSettings(): AppSettings {
+  const legacySession = localStorage.getItem(LS_SESSION_KEY_LEGACY) || '';
+  const savedPlatform = localStorage.getItem(LS_PLATFORM_KEY);
+  const platform: PlatformId = savedPlatform === 'xyq' ? 'xyq' : 'jimeng';
+
   return {
-    sessionId: localStorage.getItem(LS_SESSION_KEY) || '',
+    platform,
+    sessions: {
+      jimeng: localStorage.getItem(LS_SESSION_KEYS.jimeng) || legacySession,
+      xyq: localStorage.getItem(LS_SESSION_KEYS.xyq) || '',
+    },
   };
+}
+
+function saveSettings(settings: AppSettings) {
+  localStorage.setItem(LS_PLATFORM_KEY, settings.platform);
+  localStorage.setItem(LS_SESSION_KEYS.jimeng, settings.sessions.jimeng);
+  localStorage.setItem(LS_SESSION_KEYS.xyq, settings.sessions.xyq);
+  // 向后兼容历史单 key
+  localStorage.setItem(LS_SESSION_KEY_LEGACY, settings.sessions.jimeng);
 }
 
 export default function SettingsModal({
   isOpen,
   onClose,
-  sessionId,
-  onSessionIdChange,
+  settings,
+  onSave,
 }: SettingsModalProps) {
-  const [localSessionId, setLocalSessionId] = useState(sessionId);
+  const [localSettings, setLocalSettings] = useState<AppSettings>(settings);
   const [showSessionId, setShowSessionId] = useState(false);
 
   useEffect(() => {
-    setLocalSessionId(sessionId);
-  }, [sessionId]);
+    setLocalSettings(settings);
+  }, [settings]);
 
   if (!isOpen) return null;
 
+  const currentPlatform = localSettings.platform;
+  const currentSessionId = localSettings.sessions[currentPlatform];
+  const currentPlatformInfo =
+    PLATFORM_OPTIONS.find((item) => item.value === currentPlatform) ||
+    PLATFORM_OPTIONS[0];
+
+  const updateCurrentSession = (nextSession: string) => {
+    setLocalSettings((prev) => ({
+      ...prev,
+      sessions: {
+        ...prev.sessions,
+        [prev.platform]: nextSession,
+      },
+    }));
+  };
+
   const handleSave = () => {
-    onSessionIdChange(localSessionId);
-    localStorage.setItem(LS_SESSION_KEY, localSessionId);
+    const normalized: AppSettings = {
+      platform: localSettings.platform,
+      sessions: {
+        jimeng: localSettings.sessions.jimeng.trim(),
+        xyq: localSettings.sessions.xyq.trim(),
+      },
+    };
+    onSave(normalized);
+    saveSettings(normalized);
     onClose();
   };
 
@@ -49,15 +100,46 @@ export default function SettingsModal({
         </div>
 
         <div className="space-y-4">
+          {/* 平台选择 */}
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">生成平台</label>
+            <div className="grid grid-cols-2 gap-2">
+              {PLATFORM_OPTIONS.map((item) => (
+                <button
+                  key={item.value}
+                  onClick={() =>
+                    setLocalSettings((prev) => ({ ...prev, platform: item.value }))
+                  }
+                  className={`rounded-xl border px-3 py-2 text-left transition-colors ${
+                    localSettings.platform === item.value
+                      ? 'border-purple-500 bg-purple-500/10'
+                      : 'border-gray-700 bg-[#161824] hover:border-gray-600'
+                  }`}
+                >
+                  <div
+                    className={`text-sm font-medium ${
+                      localSettings.platform === item.value
+                        ? 'text-purple-300'
+                        : 'text-gray-200'
+                    }`}
+                  >
+                    {item.label}
+                  </div>
+                  <div className="text-[11px] text-gray-500 mt-0.5">{item.domain}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Session ID */}
           <div>
             <label className="block text-sm text-gray-400 mb-1.5">Session ID</label>
             <div className="relative">
               <input
                 type={showSessionId ? 'text' : 'password'}
-                value={localSessionId}
-                onChange={(e) => setLocalSessionId(e.target.value)}
-                placeholder="输入即梦 sessionid"
+                value={currentSessionId}
+                onChange={(e) => updateCurrentSession(e.target.value)}
+                placeholder={`输入${currentPlatformInfo.label} sessionid`}
                 className="w-full bg-[#161824] border border-gray-700 rounded-xl px-3 py-2.5 pr-10 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-purple-500 transition-colors"
               />
               <button
@@ -72,7 +154,10 @@ export default function SettingsModal({
               </button>
             </div>
             <p className="text-xs text-gray-500 mt-1">
-              从 jimeng.jianying.com 的 Cookie 中获取 sessionid
+              从 {currentPlatformInfo.domain} 的 Cookie 中获取 sessionid
+            </p>
+            <p className="text-xs text-gray-600 mt-1">
+              即梦和小云雀会分别保存各自的 session，互不覆盖。
             </p>
           </div>
         </div>

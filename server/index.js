@@ -1397,18 +1397,13 @@ async function generateSeedanceVideo(
   });
   const generateUrl = `${platformConfig.baseUrl}/mweb/v1/aigc_draft/generate?${generateQueryParams}`;
 
-  const buildGenerateBody = (mode = 'unified') => {
-    const useUnifiedEdit = mode === 'unified' && hasReferenceImages;
-    const firstImageInfo = materialList[0]?.image_info;
+  const buildGenerateBody = () => {
+    const useUnifiedEdit = hasReferenceImages;
     const videoInput = {
       type: '',
       id: generateUUID(),
       min_version: SEEDANCE_DRAFT_VERSION,
-      prompt: hasReferenceImages
-        ? useUnifiedEdit
-          ? ''
-          : normalizedPrompt || '基于参考图生成视频'
-        : normalizedPrompt,
+      prompt: normalizedPrompt || (hasReferenceImages ? '请基于参考图生成视频' : ''),
       video_mode: hasReferenceImages ? 2 : 1,
       fps: 24,
       duration_ms: actualDuration * 1000,
@@ -1420,15 +1415,6 @@ async function generateSeedanceVideo(
               id: generateUUID(),
               material_list: materialList,
               meta_list: metaList,
-            },
-          }
-        : {}),
-      ...(!useUnifiedEdit && firstImageInfo
-        ? {
-            first_frame_image: {
-              ...firstImageInfo,
-              image_uri: firstImageInfo.image_uri || firstImageInfo.uri,
-              uri: firstImageInfo.uri || firstImageInfo.image_uri,
             },
           }
         : {}),
@@ -1447,15 +1433,6 @@ async function generateSeedanceVideo(
         priority: 0,
       },
       video_task_extra: metricsExtra,
-      ...(!useUnifiedEdit && hasReferenceImages
-        ? {
-            video_ref_params: {
-              type: '',
-              id: generateUUID(),
-              generate_type: 0,
-            },
-          }
-        : {}),
     };
 
     return {
@@ -1517,10 +1494,9 @@ async function generateSeedanceVideo(
   };
 
   let generateResult = null;
-  let generateMode = hasReferenceImages ? 'unified' : 'text';
-  let generateBody = buildGenerateBody(generateMode);
+  const generateBody = buildGenerateBody();
   let needRefreshSession = false;
-  const maxGenerateAttempts = 4;
+  const maxGenerateAttempts = 3;
 
   for (let attempt = 0; attempt < maxGenerateAttempts; attempt++) {
     if (needRefreshSession) {
@@ -1561,19 +1537,6 @@ async function generateSeedanceVideo(
       continue;
     }
 
-    if (
-      retCode === '1000' &&
-      hasReferenceImages &&
-      generateMode === 'unified' &&
-      attempt < maxGenerateAttempts - 1
-    ) {
-      task.progress = '图生参数兼容中，正在自动切换模式重试...';
-      generateMode = 'first_frame_fallback';
-      generateBody = buildGenerateBody('first_frame');
-      console.log(`[${taskId}] ret=1000，切换首帧图生兼容模式重试`);
-      continue;
-    }
-
     break;
   }
 
@@ -1589,11 +1552,6 @@ async function generateSeedanceVideo(
     if (retCode === '4010') {
       throw new Error(
         `${platformConfig.name}API错误 (ret=4010): 触发安全校验。请先在${platformConfig.name}官网完成安全确认，然后更新最新 sessionid 再重试`
-      );
-    }
-    if (retCode === '1000' && hasReferenceImages) {
-      throw new Error(
-        `${platformConfig.name}API错误 (ret=1000): 图生参数校验失败。建议减少参考图数量（先用1张）并简化提示词后重试`
       );
     }
     throw new Error(`${platformConfig.name}API错误 (ret=${retCode}): ${errMsg}`);

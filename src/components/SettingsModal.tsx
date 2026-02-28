@@ -131,15 +131,21 @@ export default function SettingsModal({
             </div>
           </div>
 
-          {/* Session ID */}
+          {/* 登录凭证 */}
           <div>
-            <label className="block text-sm text-gray-400 mb-1.5">Session ID</label>
+            <label className="block text-sm text-gray-400 mb-1.5">
+              登录凭证（Cookie / Session）
+            </label>
             <div className="relative">
               <input
                 type={showSessionId ? 'text' : 'password'}
                 value={currentSessionId}
                 onChange={(e) => updateCurrentSession(e.target.value)}
-                placeholder={`输入${currentPlatformInfo.label} sessionid`}
+                placeholder={
+                  currentPlatform === 'xyq'
+                    ? '推荐粘贴小云雀整段 Cookie（自动提取关键字段）'
+                    : '推荐粘贴即梦整段 Cookie（也可仅填 sessionid）'
+                }
                 className="w-full bg-[#161824] border border-gray-700 rounded-xl px-3 py-2.5 pr-10 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-purple-500 transition-colors"
               />
               <button
@@ -155,8 +161,8 @@ export default function SettingsModal({
             </div>
             <p className="text-xs text-gray-500 mt-1">
               {currentPlatform === 'xyq'
-                ? '建议直接粘贴整段 Cookie（后端会自动提取）。仅填 sessionid/sid_tt 可能不足，需要包含 uid_tt 等关键字段'
-                : `从 ${currentPlatformInfo.domain} 的 Cookie 中获取 sessionid`}
+                ? '推荐整段 Cookie（后端自动提取 sessionid/sid_tt/uid_tt 等关键字段）。仅填单个 sessionid 经常鉴权失败'
+                : `推荐整段 Cookie（兼容只填 sessionid）。来源：${currentPlatformInfo.domain}`}
             </p>
             <p className="text-xs text-gray-600 mt-1">
               即梦和小云雀会分别保存各自的 session，互不覆盖。

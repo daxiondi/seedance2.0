@@ -233,6 +233,15 @@ const BENEFIT_TYPE_MAP = {
   'seedance-2.0-fast': 'dreamina_seedance_20_fast',
 };
 
+const XYQ_VIDEO_PART_MODEL_MAP = {
+  'seedance-2.0': 'seedance2.0_direct',
+  'seedance-2.0-fast': 'seedance2.0_fast_direct',
+};
+
+const XYQ_VIDEO_PART_AGENT_NAME = 'pippit_video_part_agent';
+const XYQ_VIDEO_PART_TOOL_NAME = 'biz/x_tool_name_video_part';
+const XYQ_VIDEO_PART_DATA_SUBTYPE = 'biz/x_data_direct_tool_call_req';
+
 const SEEDANCE_DRAFT_VERSION = '3.3.9';
 
 // 分辨率配置
@@ -1212,7 +1221,16 @@ function buildMetaListFromPrompt(prompt, imageCount) {
 // ============================================================
 async function generateXyqAgentVideo(
   taskId,
-  { prompt, ratio, files, sessionId, authCookieHeader, platformConfig }
+  {
+    prompt,
+    ratio,
+    duration,
+    files,
+    sessionId,
+    authCookieHeader,
+    model: requestModel,
+    platformConfig,
+  }
 ) {
   const task = getTask(taskId);
   if (!task) {
@@ -1222,6 +1240,25 @@ async function generateXyqAgentVideo(
   if (!normalizedPrompt) {
     throw new Error('小云雀当前仅支持纯文本要点生成，请先填写提示词');
   }
+  const parsedDuration = Number.parseInt(String(duration || 4), 10);
+  const actualDuration =
+    Number.isFinite(parsedDuration) && parsedDuration > 0
+      ? Math.min(15, Math.max(4, parsedDuration))
+      : 4;
+  const normalizedRatio =
+    typeof ratio === 'string' && VIDEO_RESOLUTION[ratio.trim()]
+      ? ratio.trim()
+      : undefined;
+  const modelKey =
+    requestModel && XYQ_VIDEO_PART_MODEL_MAP[requestModel]
+      ? requestModel
+      : 'seedance-2.0-fast';
+  const xyqModel = XYQ_VIDEO_PART_MODEL_MAP[modelKey];
+  console.log(
+    `[${taskId}] [小云雀] 沉浸式短片模型: ${modelKey} -> ${xyqModel}, 比例: ${
+      normalizedRatio || '默认'
+    }, 时长: ${actualDuration}秒`
+  );
 
   if (Array.isArray(files) && files.length > 0) {
     console.log(
@@ -1354,21 +1391,30 @@ async function generateXyqAgentVideo(
     ...(spaceId ? { space_id: spaceId } : {}),
   };
 
-  const content = [
-    { type: 'text', sub_type: 'text', data: normalizedPrompt },
-  ];
+  const directToolPayload = {
+    prompt: normalizedPrompt,
+    images: [],
+    duration_sec: actualDuration,
+    language: 'zh',
+    ...(normalizedRatio ? { ratio: normalizedRatio } : {}),
+    imitation_videos: [],
+    videos: [],
+    audios: [],
+    ...(xyqModel ? { model: xyqModel } : {}),
+  };
 
-  // 可选：比例透传为 image_settings（和前端一致）
-  if (ratio && typeof ratio === 'string') {
-    const settings = { ratio: ratio.trim() };
-    if (settings.ratio) {
-      content.push({
-        type: 'data',
-        sub_type: 'biz/image_settings',
-        data: JSON.stringify(settings),
-      });
-    }
-  }
+  const content = [
+    {
+      type: 'data',
+      sub_type: XYQ_VIDEO_PART_DATA_SUBTYPE,
+      data: JSON.stringify({
+        param: JSON.stringify(directToolPayload),
+        tool_name: XYQ_VIDEO_PART_TOOL_NAME,
+      }),
+      hidden: false,
+      is_thought: false,
+    },
+  ];
 
   const threadId = generateUUID();
   const runId = generateUUID();
@@ -1392,7 +1438,7 @@ async function generateXyqAgentVideo(
       data: {
         message,
         user_info: xyqUserInfo,
-        agent_name: 'pippit_video_agent_v2_cn',
+        agent_name: XYQ_VIDEO_PART_AGENT_NAME,
         entrance_from: 'web',
         request_id: generateUUID(),
       },
@@ -1507,7 +1553,10 @@ async function generateXyqAgentVideo(
     sessionId,
     platformConfig,
     {
-      data: { artifact_id: String(artifactId), user_id: String(consumerUid) },
+      data: {
+        artifact_id: String(artifactId),
+        user_id: String(resolvedConsumerUid),
+      },
       headers: requestHeaders,
     },
     authCookieHeader
@@ -2095,23 +2144,17 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     if (!platformConfig) {
       return res.status(400).json({ error: '不支持的平台类型，仅支持 jimeng / xyq' });
     }
-    const xyqMode = String(req.body.xyqMode || '').trim().toLowerCase();
-    const useXyqAgent =
-      platformConfig.key === 'xyq' && xyqMode === 'agent';
-    const effectivePlatformConfig =
-      platformConfig.key === 'xyq' && !useXyqAgent
-        ? PLATFORM_CONFIGS.jimeng
-        : platformConfig;
+    const useXyqVideoPart = platformConfig.key === 'xyq';
 
     // 认证检查
     const authContext = resolveAuthContext(
-      effectivePlatformConfig.key,
+      platformConfig.key,
       sessionId
     );
     if (!authContext.sessionId) {
       return res
         .status(401)
-        .json({ error: `未配置 ${effectivePlatformConfig.name} Session ID，请在设置中填写` });
+        .json({ error: `未配置 ${platformConfig.name} Session ID，请在设置中填写` });
     }
 
     if (!String(prompt || '').trim() && files.length === 0) {
@@ -2134,10 +2177,8 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
 
     console.log(`\n========== [${taskId}] 收到视频生成请求 ==========`);
     console.log(`  platform: ${platformConfig.name} (${platformConfig.key})`);
-    if (platformConfig.key === 'xyq' && !useXyqAgent) {
-      console.log(`  xyqMode: seedance (engine=${effectivePlatformConfig.name})`);
-    } else if (platformConfig.key === 'xyq' && useXyqAgent) {
-      console.log(`  xyqMode: agent`);
+    if (useXyqVideoPart) {
+      console.log('  xyqMode: immersive-video-part');
     }
     console.log(`  prompt: ${(prompt || '').substring(0, 80)}${(prompt || '').length > 80 ? '...' : ''}`);
     console.log(`  model: ${model || 'seedance-2.0'}, ratio: ${ratio || '4:3'}, duration: ${duration || 4}秒`);
@@ -2152,8 +2193,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     res.json({ taskId });
 
     // 后台执行视频生成
-    // 小云雀布局下默认走 Seedance 引擎（即梦端点），如需 Agent 可显式 xyqMode=agent。
-    const generator = useXyqAgent ? generateXyqAgentVideo : generateSeedanceVideo;
+    const generator = useXyqVideoPart ? generateXyqAgentVideo : generateSeedanceVideo;
 
     generator(taskId, {
       prompt,
@@ -2163,7 +2203,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
       sessionId: authContext.sessionId,
       authCookieHeader: authContext.cookieHeader,
       model: model || 'seedance-2.0',
-      platformConfig: effectivePlatformConfig,
+      platformConfig,
     })
       .then((videoUrl) => {
         task.status = 'done';

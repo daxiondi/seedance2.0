@@ -129,6 +129,7 @@ export default function App() {
   const [notificationState, setNotificationState] =
     useState<NotificationState>('unsupported');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const submitLockRef = useRef(false);
   const maxImages = 5;
 
   useEffect(() => {
@@ -240,7 +241,8 @@ export default function App() {
 
   const handleGenerate = useCallback(async () => {
     if (!prompt.trim() && images.length === 0) return;
-    if (generation.status === 'generating') return;
+    if (generation.status === 'generating' || submitLockRef.current) return;
+    submitLockRef.current = true;
     const activeSessionId = sessions[platform] || getEnvSessionId(platform);
 
     void ensureNotificationPermission();
@@ -298,6 +300,8 @@ export default function App() {
         error: message,
       });
       notifyByBrowser('Seedance 生成失败', message);
+    } finally {
+      submitLockRef.current = false;
     }
   }, [
     prompt,

@@ -538,6 +538,37 @@ function findFirstValueByKeys(value, keys) {
   return walk(value);
 }
 
+function extractXyqVideoUrlFromArtifact(artifactResult) {
+  const payload = artifactResult?.artifact || artifactResult?.data || artifactResult;
+  const contentList = Array.isArray(payload?.content) ? payload.content : [];
+
+  for (const content of contentList) {
+    const maybeJson = safeJsonParse(String(content?.data || ''));
+    const candidate =
+      maybeJson?.video?.download_url ||
+      maybeJson?.video?.origin_url ||
+      maybeJson?.video?.preview_url ||
+      maybeJson?.video?.url ||
+      maybeJson?.download_url ||
+      maybeJson?.origin_url ||
+      maybeJson?.preview_url ||
+      maybeJson?.url;
+    if (candidate) {
+      return String(candidate);
+    }
+  }
+
+  return (
+    findFirstValueByKeys(payload, [
+      'download_url',
+      'origin_url',
+      'preview_url',
+      'url',
+      'video_url',
+    ]) || ''
+  );
+}
+
 function generateCookie(sessionId, platformConfig, rawCookieHeader = '') {
   const defaultCookies =
     platformConfig?.key === 'xyq'
@@ -1481,6 +1512,12 @@ async function generateXyqAgentVideo(
     },
     authCookieHeader
   );
+
+  const artifactVideoUrl = extractXyqVideoUrlFromArtifact(artifactResult);
+  if (artifactVideoUrl) {
+    console.log(`[${taskId}] [小云雀] 从 get_run_artifact 直接获取到视频URL`);
+    return artifactVideoUrl;
+  }
 
   const pippitAssetId = findFirstValueByKeys(artifactResult, [
     'pippit_asset_id',

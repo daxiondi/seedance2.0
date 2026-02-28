@@ -1544,6 +1544,9 @@ async function generateSeedanceVideo(
   if (generateResult.ret !== undefined && String(generateResult.ret) !== '0') {
     const retCode = String(generateResult.ret);
     const errMsg = generateResult.errmsg || retCode;
+    console.error(
+      `[${taskId}] generate失败详情: ${JSON.stringify(generateResult).slice(0, 2000)}`
+    );
     if (retCode === '5000') {
       throw new Error(
         `${platformConfig.name}积分不足，请前往${platformConfig.name}官网领取积分`

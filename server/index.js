@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import crypto from 'crypto';
+import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import browserService from './browser-service.js';
@@ -12,11 +13,33 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const DEFAULT_SESSION_ID = process.env.VITE_DEFAULT_SESSION_ID || '';
 const DEFAULT_XYQ_SESSION_ID = process.env.VITE_DEFAULT_XYQ_SESSION_ID || '';
+
+function readPositiveNumber(rawValue, fallbackValue) {
+  const parsed = Number(rawValue);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackValue;
+}
+
 const configuredTimeoutMs = Number(process.env.VIDEO_GENERATION_TIMEOUT_MS);
 const VIDEO_GENERATION_TIMEOUT_MS =
   Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
     ? configuredTimeoutMs
     : 45 * 60 * 1000;
+const TASK_STORE_FILE = path.resolve(
+  process.env.TASK_STORE_FILE || path.join(__dirname, '../data/tasks.json')
+);
+const TASK_STORE_FLUSH_DELAY_MS = readPositiveNumber(
+  process.env.TASK_STORE_FLUSH_DELAY_MS,
+  400
+);
+const TASK_RESULT_TTL_MS = readPositiveNumber(
+  process.env.TASK_RESULT_TTL_MS,
+  7 * 24 * 60 * 60 * 1000
+);
+const TASK_PROCESSING_TTL_MS = readPositiveNumber(
+  process.env.TASK_PROCESSING_TTL_MS ||
+    Math.max(VIDEO_GENERATION_TIMEOUT_MS * 2, 2 * 60 * 60 * 1000),
+  Math.max(VIDEO_GENERATION_TIMEOUT_MS * 2, 2 * 60 * 60 * 1000)
+);
 
 app.use(cors());
 app.use(express.json());
@@ -227,18 +250,202 @@ const VIDEO_RESOLUTION = {
 // ============================================================
 const tasks = new Map();
 let taskCounter = 0;
+let taskStoreWriteTimer = null;
+let taskStoreWriting = false;
+let taskStorePendingWrite = false;
+let suppressTaskStoreWrite = false;
 
 function createTaskId() {
   return `task_${++taskCounter}_${Date.now()}`;
 }
 
+function extractCounterFromTaskId(taskId) {
+  const match = String(taskId || '').match(/^task_(\d+)_\d+$/);
+  if (!match) return 0;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function normalizeTask(task) {
+  const normalizedStartTime = Number(task?.startTime);
+  const normalizedStatus = String(task?.status || 'processing');
+  const status =
+    normalizedStatus === 'done' ||
+    normalizedStatus === 'error' ||
+    normalizedStatus === 'processing'
+      ? normalizedStatus
+      : 'processing';
+
+  return {
+    id: String(task?.id || ''),
+    platform: task?.platform === 'xyq' ? 'xyq' : 'jimeng',
+    status,
+    progress: String(task?.progress || ''),
+    startTime:
+      Number.isFinite(normalizedStartTime) && normalizedStartTime > 0
+        ? normalizedStartTime
+        : Date.now(),
+    result: task?.result ?? null,
+    error: task?.error ? String(task.error) : null,
+  };
+}
+
+function scheduleTaskStoreWrite(delayMs = TASK_STORE_FLUSH_DELAY_MS) {
+  if (suppressTaskStoreWrite) return;
+  if (taskStoreWriteTimer) clearTimeout(taskStoreWriteTimer);
+  taskStoreWriteTimer = setTimeout(() => {
+    taskStoreWriteTimer = null;
+    void flushTaskStoreToDisk();
+  }, delayMs);
+}
+
+async function flushTaskStoreToDisk() {
+  if (taskStoreWriting) {
+    taskStorePendingWrite = true;
+    return;
+  }
+
+  taskStoreWriting = true;
+  try {
+    const payload = {
+      version: 1,
+      updatedAt: Date.now(),
+      taskCounter,
+      tasks: Array.from(tasks.values()).map((task) => normalizeTask(task)),
+    };
+
+    await fs.mkdir(path.dirname(TASK_STORE_FILE), { recursive: true });
+    const tmpFile = `${TASK_STORE_FILE}.tmp`;
+    await fs.writeFile(tmpFile, JSON.stringify(payload), 'utf8');
+    await fs.rename(tmpFile, TASK_STORE_FILE);
+  } catch (error) {
+    console.error(`[tasks] 持久化失败: ${error.message}`);
+  } finally {
+    taskStoreWriting = false;
+    if (taskStorePendingWrite) {
+      taskStorePendingWrite = false;
+      void flushTaskStoreToDisk();
+    }
+  }
+}
+
+function trackTask(task) {
+  const target = normalizeTask(task);
+  return new Proxy(target, {
+    set(obj, prop, value) {
+      obj[prop] = value;
+      scheduleTaskStoreWrite();
+      return true;
+    },
+  });
+}
+
+function setTask(taskId, taskValue) {
+  const trackedTask = trackTask({ ...taskValue, id: taskId });
+  tasks.set(taskId, trackedTask);
+  scheduleTaskStoreWrite();
+  return trackedTask;
+}
+
+function getTask(taskId) {
+  return tasks.get(taskId);
+}
+
+function deleteTask(taskId) {
+  const deleted = tasks.delete(taskId);
+  if (deleted) scheduleTaskStoreWrite();
+  return deleted;
+}
+
+async function loadTaskStoreFromDisk() {
+  try {
+    await fs.mkdir(path.dirname(TASK_STORE_FILE), { recursive: true });
+  } catch (error) {
+    console.error(`[tasks] 创建任务目录失败: ${error.message}`);
+    return;
+  }
+
+  let raw = '';
+  try {
+    raw = await fs.readFile(TASK_STORE_FILE, 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.error(`[tasks] 读取任务文件失败: ${error.message}`);
+    }
+    return;
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    console.error(`[tasks] 任务文件 JSON 解析失败: ${error.message}`);
+    return;
+  }
+
+  const persistedTasks = Array.isArray(parsed?.tasks) ? parsed.tasks : [];
+  const persistedCounter = Number(parsed?.taskCounter);
+  const now = Date.now();
+  let loaded = 0;
+  let skipped = 0;
+
+  suppressTaskStoreWrite = true;
+  try {
+    taskCounter =
+      Number.isFinite(persistedCounter) && persistedCounter > 0
+        ? persistedCounter
+        : 0;
+
+    for (const rawTask of persistedTasks) {
+      const normalized = normalizeTask(rawTask);
+      if (!normalized.id) {
+        skipped += 1;
+        continue;
+      }
+
+      const ttlMs =
+        normalized.status === 'processing'
+          ? TASK_PROCESSING_TTL_MS
+          : TASK_RESULT_TTL_MS;
+      if (now - normalized.startTime > ttlMs) {
+        skipped += 1;
+        continue;
+      }
+
+      if (normalized.status === 'processing') {
+        normalized.status = 'error';
+        normalized.error = '服务已重启，未完成任务无法恢复，请重新提交。';
+        normalized.progress = '服务已重启，任务中断';
+      }
+
+      tasks.set(normalized.id, trackTask(normalized));
+      taskCounter = Math.max(taskCounter, extractCounterFromTaskId(normalized.id));
+      loaded += 1;
+    }
+  } finally {
+    suppressTaskStoreWrite = false;
+  }
+
+  if (loaded > 0 || skipped > 0) {
+    console.log(`[tasks] 已恢复 ${loaded} 条任务，清理 ${skipped} 条无效/过期任务`);
+    scheduleTaskStoreWrite();
+  }
+}
+
 // 定期清理过期任务
 setInterval(() => {
   const now = Date.now();
+  let removed = 0;
   for (const [id, task] of tasks) {
-    if (now - task.startTime > 30 * 60 * 1000) {
-      tasks.delete(id);
+    const ttlMs =
+      task.status === 'processing' ? TASK_PROCESSING_TTL_MS : TASK_RESULT_TTL_MS;
+    if (now - Number(task.startTime || now) > ttlMs) {
+      deleteTask(id);
+      removed += 1;
     }
+  }
+  if (removed > 0) {
+    console.log(`[tasks] 已清理 ${removed} 条过期任务`);
   }
 }, 60000);
 
@@ -976,7 +1183,10 @@ async function generateXyqAgentVideo(
   taskId,
   { prompt, ratio, files, sessionId, authCookieHeader, platformConfig }
 ) {
-  const task = tasks.get(taskId);
+  const task = getTask(taskId);
+  if (!task) {
+    throw new Error('任务不存在或已过期，请重新提交');
+  }
   const normalizedPrompt = String(prompt || '').trim();
   if (!normalizedPrompt) {
     throw new Error('小云雀当前仅支持纯文本要点生成，请先填写提示词');
@@ -1282,7 +1492,10 @@ async function generateSeedanceVideo(
     platformConfig,
   }
 ) {
-  const task = tasks.get(taskId);
+  const task = getTask(taskId);
+  if (!task) {
+    throw new Error('任务不存在或已过期，请重新提交');
+  }
   const modelKey = requestModel && MODEL_MAP[requestModel] ? requestModel : 'seedance-2.0';
   const model = MODEL_MAP[modelKey];
   const benefitType = BENEFIT_TYPE_MAP[modelKey];
@@ -1815,7 +2028,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
 
     // 创建任务
     const taskId = createTaskId();
-    const task = {
+    const task = setTask(taskId, {
       id: taskId,
       platform: platformConfig.key,
       status: 'processing',
@@ -1823,8 +2036,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
       startTime,
       result: null,
       error: null,
-    };
-    tasks.set(taskId, task);
+    });
 
     console.log(`\n========== [${taskId}] 收到视频生成请求 ==========`);
     console.log(`  platform: ${platformConfig.name} (${platformConfig.key})`);
@@ -1883,7 +2095,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
 
 // GET /api/task/:taskId - 轮询任务状态
 app.get('/api/task/:taskId', (req, res) => {
-  const task = tasks.get(req.params.taskId);
+  const task = getTask(req.params.taskId);
   if (!task) {
     return res.status(404).json({ error: '任务不存在' });
   }
@@ -1892,13 +2104,11 @@ app.get('/api/task/:taskId', (req, res) => {
 
   if (task.status === 'done') {
     res.json({ status: 'done', elapsed, result: task.result });
-    setTimeout(() => tasks.delete(task.id), 300000);
     return;
   }
 
   if (task.status === 'error') {
     res.json({ status: 'error', elapsed, error: task.error });
-    setTimeout(() => tasks.delete(task.id), 300000);
     return;
   }
 
@@ -1988,31 +2198,56 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-// 优雅关闭: 清理浏览器进程
+// 优雅关闭: 清理浏览器进程并落盘任务状态
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] 收到 ${signal}，正在关闭...`);
+
+  if (taskStoreWriteTimer) {
+    clearTimeout(taskStoreWriteTimer);
+    taskStoreWriteTimer = null;
+  }
+  await flushTaskStoreToDisk();
+  await browserService.close();
+  process.exit(0);
+}
+
 process.on('SIGTERM', () => {
-  console.log('[server] 收到 SIGTERM，正在关闭...');
-  browserService.close().finally(() => process.exit(0));
+  void shutdown('SIGTERM');
 });
 process.on('SIGINT', () => {
-  console.log('[server] 收到 SIGINT，正在关闭...');
-  browserService.close().finally(() => process.exit(0));
+  void shutdown('SIGINT');
 });
 
-app.listen(PORT, () => {
-  console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
-  console.log(`🔗 多平台直连 API:`);
-  console.log(`   - 即梦: ${PLATFORM_CONFIGS.jimeng.baseUrl}`);
-  console.log(`   - 小云雀: ${PLATFORM_CONFIGS.xyq.baseUrl}`);
-  console.log(
-    `⏱️ 生成超时时间: ${Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 60000)} 分钟`
-  );
-  console.log(
-    `🔑 默认即梦 Session ID: ${DEFAULT_SESSION_ID ? `已配置 (长度${DEFAULT_SESSION_ID.length})` : '未配置'}`
-  );
-  console.log(
-    `🔑 默认小云雀 Session ID: ${DEFAULT_XYQ_SESSION_ID ? `已配置 (长度${DEFAULT_XYQ_SESSION_ID.length})` : '未配置'}`
-  );
-  console.log(
-    `📁 运行模式: ${process.env.NODE_ENV === 'production' ? '生产' : '开发'}\n`
-  );
+async function startServer() {
+  await loadTaskStoreFromDisk();
+
+  app.listen(PORT, () => {
+    console.log(`\n🚀 服务器已启动: http://localhost:${PORT}`);
+    console.log(`🔗 多平台直连 API:`);
+    console.log(`   - 即梦: ${PLATFORM_CONFIGS.jimeng.baseUrl}`);
+    console.log(`   - 小云雀: ${PLATFORM_CONFIGS.xyq.baseUrl}`);
+    console.log(
+      `⏱️ 生成超时时间: ${Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 60000)} 分钟`
+    );
+    console.log(
+      `💾 任务持久化文件: ${TASK_STORE_FILE}`
+    );
+    console.log(
+      `🔑 默认即梦 Session ID: ${DEFAULT_SESSION_ID ? `已配置 (长度${DEFAULT_SESSION_ID.length})` : '未配置'}`
+    );
+    console.log(
+      `🔑 默认小云雀 Session ID: ${DEFAULT_XYQ_SESSION_ID ? `已配置 (长度${DEFAULT_XYQ_SESSION_ID.length})` : '未配置'}`
+    );
+    console.log(
+      `📁 运行模式: ${process.env.NODE_ENV === 'production' ? '生产' : '开发'}\n`
+    );
+  });
+}
+
+startServer().catch((error) => {
+  console.error(`[server] 启动失败: ${error.message}`);
+  process.exit(1);
 });

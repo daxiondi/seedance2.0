@@ -16,7 +16,7 @@ import {
   MODEL_OPTIONS,
   PLATFORM_LABEL_MAP,
 } from './types';
-import { generateVideo } from './services/videoService';
+import { submitVideoTask, pollVideoTask } from './services/videoService';
 import VideoPlayer from './components/VideoPlayer';
 import SettingsModal, { loadSettings } from './components/SettingsModal';
 import { GearIcon, PlusIcon, CloseIcon, SparkleIcon } from './components/Icons';
@@ -25,6 +25,7 @@ let nextId = 0;
 const HISTORY_COOKIE_KEY = 'seedance_history_v1';
 const HISTORY_COOKIE_DAYS = 30;
 const MAX_HISTORY_ITEMS = 5;
+const PENDING_TASK_STORAGE_KEY = 'seedance_pending_task_v1';
 const DEFAULT_PLATFORM: PlatformId = 'jimeng';
 const EMPTY_SESSIONS: Record<PlatformId, string> = {
   jimeng: '',
@@ -35,6 +36,15 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api').replace(
   ''
 );
 type NotificationState = NotificationPermission | 'unsupported';
+interface PendingTaskSnapshot {
+  taskId: string;
+  platform: PlatformId;
+  model: ModelId;
+  ratio: AspectRatio;
+  duration: Duration;
+  prompt: string;
+  startedAt: number;
+}
 
 function getNotificationState(): NotificationState {
   if (typeof window === 'undefined' || !('Notification' in window)) {
@@ -48,6 +58,37 @@ function getEnvSessionId(platform: PlatformId): string {
     return String(import.meta.env.VITE_DEFAULT_XYQ_SESSION_ID || '').trim();
   }
   return String(import.meta.env.VITE_DEFAULT_SESSION_ID || '').trim();
+}
+
+function loadPendingTask(): PendingTaskSnapshot | null {
+  try {
+    const raw = localStorage.getItem(PENDING_TASK_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.taskId !== 'string') return null;
+    if (parsed.platform !== 'jimeng' && parsed.platform !== 'xyq') return null;
+    return parsed as PendingTaskSnapshot;
+  } catch {
+    return null;
+  }
+}
+
+function savePendingTask(task: PendingTaskSnapshot) {
+  localStorage.setItem(PENDING_TASK_STORAGE_KEY, JSON.stringify(task));
+}
+
+function clearPendingTask() {
+  localStorage.removeItem(PENDING_TASK_STORAGE_KEY);
+}
+
+function isRecoverableNetworkError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('failed to fetch') ||
+    lower.includes('network') ||
+    lower.includes('网络') ||
+    lower.includes('非json')
+  );
 }
 
 function getCookie(name: string): string | null {
@@ -239,6 +280,92 @@ export default function App() {
     });
   }, []);
 
+  const handleGenerationSuccess = useCallback(
+    (
+      result: Awaited<ReturnType<typeof pollVideoTask>>,
+      snapshot: {
+        platform: PlatformId;
+        model: ModelId;
+        ratio: AspectRatio;
+        duration: Duration;
+        prompt: string;
+      }
+    ) => {
+      if (!result.data || result.data.length === 0 || !result.data[0].url) {
+        throw new Error('未获取到视频结果，请重试');
+      }
+
+      const historyItem: GenerationHistoryItem = {
+        id: `history_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        createdAt: Date.now(),
+        platform: snapshot.platform,
+        model: snapshot.model,
+        ratio: snapshot.ratio,
+        duration: snapshot.duration,
+        prompt: snapshot.prompt,
+        revisedPrompt: result.data[0].revised_prompt || snapshot.prompt,
+        videoUrl: result.data[0].url,
+      };
+
+      appendHistory(historyItem);
+      setResultPlatform(snapshot.platform);
+      setGeneration({ status: 'success', result });
+      notifyByBrowser(
+        'Seedance 视频已生成',
+        '生成已完成，回到页面即可预览和下载。'
+      );
+    },
+    [appendHistory, notifyByBrowser]
+  );
+
+  const resumePendingTask = useCallback(
+    async (pending: PendingTaskSnapshot) => {
+      if (submitLockRef.current) return;
+      submitLockRef.current = true;
+      setPlatform(pending.platform);
+      setGeneration({
+        status: 'generating',
+        progress: '检测到未完成任务，正在恢复查询...',
+      });
+
+      try {
+        const result = await pollVideoTask(pending.taskId, (progress) => {
+          setGeneration((prev) => ({ ...prev, progress }));
+        });
+        handleGenerationSuccess(result, {
+          platform: pending.platform,
+          model: pending.model,
+          ratio: pending.ratio,
+          duration: pending.duration,
+          prompt: pending.prompt,
+        });
+        clearPendingTask();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '未知错误';
+        if (isRecoverableNetworkError(message)) {
+          setGeneration({
+            status: 'error',
+            error: '网络中断，但任务可能仍在后台。稍后刷新页面会自动继续查询。',
+          });
+          return;
+        }
+
+        clearPendingTask();
+        setGeneration({ status: 'error', error: message });
+        notifyByBrowser('Seedance 生成失败', message);
+      } finally {
+        submitLockRef.current = false;
+      }
+    },
+    [handleGenerationSuccess, notifyByBrowser]
+  );
+
+  useEffect(() => {
+    const pending = loadPendingTask();
+    if (!pending) return;
+    void resumePendingTask(pending);
+  }, [resumePendingTask]);
+
   const handleGenerate = useCallback(async () => {
     if (!prompt.trim() && images.length === 0) return;
     if (generation.status === 'generating' || submitLockRef.current) return;
@@ -251,8 +378,18 @@ export default function App() {
       progress: '正在提交视频生成请求...',
     });
 
+    const snapshot: PendingTaskSnapshot = {
+      taskId: '',
+      platform,
+      model,
+      ratio,
+      duration,
+      prompt,
+      startedAt: Date.now(),
+    };
+
     try {
-      const result = await generateVideo(
+      const taskId = await submitVideoTask(
         {
           prompt,
           model,
@@ -266,35 +403,31 @@ export default function App() {
           setGeneration((prev) => ({ ...prev, progress }));
         }
       );
+      snapshot.taskId = taskId;
+      savePendingTask(snapshot);
 
-      if (result.data && result.data.length > 0 && result.data[0].url) {
-        const historyItem: GenerationHistoryItem = {
-          id: `history_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
-          createdAt: Date.now(),
-          platform,
-          model,
-          ratio,
-          duration,
-          prompt,
-          revisedPrompt: result.data[0].revised_prompt || prompt,
-          videoUrl: result.data[0].url,
-        };
-
-        appendHistory(historyItem);
-        setResultPlatform(platform);
-        setGeneration({ status: 'success', result });
-        notifyByBrowser(
-          'Seedance 视频已生成',
-          '生成已完成，回到页面即可预览和下载。'
-        );
-      } else {
-        setGeneration({
-          status: 'error',
-          error: '未获取到视频结果，请重试',
-        });
-      }
+      const result = await pollVideoTask(taskId, (progress) => {
+        setGeneration((prev) => ({ ...prev, progress }));
+      });
+      handleGenerationSuccess(result, {
+        platform,
+        model,
+        ratio,
+        duration,
+        prompt,
+      });
+      clearPendingTask();
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误';
+      if (isRecoverableNetworkError(message)) {
+        setGeneration({
+          status: 'error',
+          error: '网络中断，但任务可能仍在后台。刷新页面后会自动继续查询结果。',
+        });
+        return;
+      }
+
+      clearPendingTask();
       setGeneration({
         status: 'error',
         error: message,
@@ -312,7 +445,7 @@ export default function App() {
     platform,
     sessions,
     generation.status,
-    appendHistory,
+    handleGenerationSuccess,
     ensureNotificationPermission,
     notifyByBrowser,
   ]);

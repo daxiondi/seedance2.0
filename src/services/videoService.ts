@@ -30,10 +30,7 @@ async function parseJsonResponse<T>(response: Response, scene: string): Promise<
   }
 }
 
-export async function generateVideo(
-  request: GenerateVideoRequest,
-  onProgress?: (message: string) => void
-): Promise<VideoGenerationResponse> {
+function buildGenerateFormData(request: GenerateVideoRequest): FormData {
   const formData = new FormData();
   formData.append('prompt', request.prompt);
   formData.append('model', request.model);
@@ -51,7 +48,15 @@ export async function generateVideo(
     formData.append('files', file);
   }
 
-  // 第1步: 提交任务
+  return formData;
+}
+
+export async function submitVideoTask(
+  request: GenerateVideoRequest,
+  onProgress?: (message: string) => void
+): Promise<string> {
+  const formData = buildGenerateFormData(request);
+
   onProgress?.('正在提交视频生成请求...');
   const submitRes = await fetch(apiUrl('/generate-video'), {
     method: 'POST',
@@ -71,7 +76,17 @@ export async function generateVideo(
     throw new Error('服务器未返回任务ID');
   }
 
-  // 第2步: 轮询获取结果
+  return taskId;
+}
+
+export async function pollVideoTask(
+  taskId: string,
+  onProgress?: (message: string) => void
+): Promise<VideoGenerationResponse> {
+  if (!taskId) {
+    throw new Error('任务ID为空');
+  }
+
   onProgress?.('已提交，等待AI生成视频...');
 
   const pollInterval = 3000; // 3 秒
@@ -80,13 +95,24 @@ export async function generateVideo(
   while (Date.now() - startTime < POLL_TIMEOUT_MS) {
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
-    const pollRes = await fetch(apiUrl(`/task/${taskId}`));
+    let pollRes: Response;
+    try {
+      pollRes = await fetch(apiUrl(`/task/${taskId}`));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '网络请求失败';
+      throw new Error(`轮询任务失败：${message}`);
+    }
+
     const pollData = await parseJsonResponse<{
       status?: string;
       result?: VideoGenerationResponse;
       error?: string;
       progress?: string;
     }>(pollRes, '轮询任务');
+    if (!pollRes.ok) {
+      throw new Error(pollData.error || `轮询失败 (HTTP ${pollRes.status})`);
+    }
 
     if (pollData.status === 'done') {
       const result = pollData.result;
@@ -108,4 +134,12 @@ export async function generateVideo(
 
   const timeoutMinutes = Math.ceil(POLL_TIMEOUT_MS / 60000);
   throw new Error(`视频生成超时 (约${timeoutMinutes}分钟)，请稍后重试`);
+}
+
+export async function generateVideo(
+  request: GenerateVideoRequest,
+  onProgress?: (message: string) => void
+): Promise<VideoGenerationResponse> {
+  const taskId = await submitVideoTask(request, onProgress);
+  return pollVideoTask(taskId, onProgress);
 }

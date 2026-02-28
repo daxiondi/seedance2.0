@@ -2095,13 +2095,23 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     if (!platformConfig) {
       return res.status(400).json({ error: '不支持的平台类型，仅支持 jimeng / xyq' });
     }
+    const xyqMode = String(req.body.xyqMode || '').trim().toLowerCase();
+    const useXyqAgent =
+      platformConfig.key === 'xyq' && xyqMode === 'agent';
+    const effectivePlatformConfig =
+      platformConfig.key === 'xyq' && !useXyqAgent
+        ? PLATFORM_CONFIGS.jimeng
+        : platformConfig;
 
     // 认证检查
-    const authContext = resolveAuthContext(platformConfig.key, sessionId);
+    const authContext = resolveAuthContext(
+      effectivePlatformConfig.key,
+      sessionId
+    );
     if (!authContext.sessionId) {
       return res
         .status(401)
-        .json({ error: `未配置 ${platformConfig.name} Session ID，请在设置中填写` });
+        .json({ error: `未配置 ${effectivePlatformConfig.name} Session ID，请在设置中填写` });
     }
 
     if (!String(prompt || '').trim() && files.length === 0) {
@@ -2124,10 +2134,10 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
 
     console.log(`\n========== [${taskId}] 收到视频生成请求 ==========`);
     console.log(`  platform: ${platformConfig.name} (${platformConfig.key})`);
-    if (platformConfig.key === 'xyq') {
-      console.log(
-        `  xyqMode: ${String(req.body.xyqMode || '').trim().toLowerCase() || 'seedance'}`
-      );
+    if (platformConfig.key === 'xyq' && !useXyqAgent) {
+      console.log(`  xyqMode: seedance (engine=${effectivePlatformConfig.name})`);
+    } else if (platformConfig.key === 'xyq' && useXyqAgent) {
+      console.log(`  xyqMode: agent`);
     }
     console.log(`  prompt: ${(prompt || '').substring(0, 80)}${(prompt || '').length > 80 ? '...' : ''}`);
     console.log(`  model: ${model || 'seedance-2.0'}, ratio: ${ratio || '4:3'}, duration: ${duration || 4}秒`);
@@ -2142,13 +2152,8 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
     res.json({ taskId });
 
     // 后台执行视频生成
-    // 默认使用 Seedance 直连链路，确保 model=seedance-2.0 / seedance-2.0-fast 生效。
-    // 如需回退到小云雀 Agent，可在请求中传 xyqMode=agent（仅调试用途）。
-    const xyqMode = String(req.body.xyqMode || '').trim().toLowerCase();
-    const generator =
-      platformConfig.key === 'xyq' && xyqMode === 'agent'
-        ? generateXyqAgentVideo
-        : generateSeedanceVideo;
+    // 小云雀布局下默认走 Seedance 引擎（即梦端点），如需 Agent 可显式 xyqMode=agent。
+    const generator = useXyqAgent ? generateXyqAgentVideo : generateSeedanceVideo;
 
     generator(taskId, {
       prompt,
@@ -2158,7 +2163,7 @@ app.post('/api/generate-video', upload.array('files', 5), async (req, res) => {
       sessionId: authContext.sessionId,
       authCookieHeader: authContext.cookieHeader,
       model: model || 'seedance-2.0',
-      platformConfig,
+      platformConfig: effectivePlatformConfig,
     })
       .then((videoUrl) => {
         task.status = 'done';

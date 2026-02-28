@@ -1397,100 +1397,133 @@ async function generateSeedanceVideo(
   });
   const generateUrl = `${platformConfig.baseUrl}/mweb/v1/aigc_draft/generate?${generateQueryParams}`;
 
-  const generateBody = {
-    extend: {
-      root_model: model,
-      m_video_commerce_info: {
-        benefit_type: benefitType,
-        resource_id: 'generate_video',
-        resource_id_type: 'str',
-        resource_sub_type: 'aigc',
+  const buildGenerateBody = (mode = 'unified') => {
+    const useUnifiedEdit = mode === 'unified' && hasReferenceImages;
+    const firstImageInfo = materialList[0]?.image_info;
+    const videoInput = {
+      type: '',
+      id: generateUUID(),
+      min_version: SEEDANCE_DRAFT_VERSION,
+      prompt: hasReferenceImages
+        ? useUnifiedEdit
+          ? ''
+          : normalizedPrompt || '基于参考图生成视频'
+        : normalizedPrompt,
+      video_mode: hasReferenceImages ? 2 : 1,
+      fps: 24,
+      duration_ms: actualDuration * 1000,
+      idip_meta_list: [],
+      ...(useUnifiedEdit
+        ? {
+            unified_edit_input: {
+              type: '',
+              id: generateUUID(),
+              material_list: materialList,
+              meta_list: metaList,
+            },
+          }
+        : {}),
+      ...(!useUnifiedEdit && firstImageInfo
+        ? {
+            first_frame_image: {
+              ...firstImageInfo,
+              image_uri: firstImageInfo.image_uri || firstImageInfo.uri,
+              uri: firstImageInfo.uri || firstImageInfo.image_uri,
+            },
+          }
+        : {}),
+    };
+
+    const genVideoAbility = {
+      type: '',
+      id: generateUUID(),
+      text_to_video_params: {
+        type: '',
+        id: generateUUID(),
+        video_gen_inputs: [videoInput],
+        video_aspect_ratio: aspectRatio,
+        seed: Math.floor(Math.random() * 1000000000),
+        model_req_key: model,
+        priority: 0,
       },
-      m_video_commerce_info_list: [
-        {
+      video_task_extra: metricsExtra,
+      ...(!useUnifiedEdit && hasReferenceImages
+        ? {
+            video_ref_params: {
+              type: '',
+              id: generateUUID(),
+              generate_type: 0,
+            },
+          }
+        : {}),
+    };
+
+    return {
+      extend: {
+        root_model: model,
+        m_video_commerce_info: {
           benefit_type: benefitType,
           resource_id: 'generate_video',
           resource_id_type: 'str',
           resource_sub_type: 'aigc',
         },
-      ],
-    },
-    submit_id: submitId,
-    metrics_extra: metricsExtra,
-    draft_content: JSON.stringify({
-      type: 'draft',
-      id: generateUUID(),
-      min_version: SEEDANCE_DRAFT_VERSION,
-      min_features: ['AIGC_Video_UnifiedEdit'],
-      is_from_tsn: true,
-      version: SEEDANCE_DRAFT_VERSION,
-      main_component_id: componentId,
-      component_list: [
-        {
-          type: 'video_base_component',
-          id: componentId,
-          min_version: '1.0.0',
-          aigc_mode: 'workbench',
-          metadata: {
-            type: '',
-            id: generateUUID(),
-            created_platform: 3,
-            created_platform_version: '',
-            created_time_in_ms: String(Date.now()),
-            created_did: '',
+        m_video_commerce_info_list: [
+          {
+            benefit_type: benefitType,
+            resource_id: 'generate_video',
+            resource_id_type: 'str',
+            resource_sub_type: 'aigc',
           },
-          generate_type: 'gen_video',
-          abilities: {
-            type: '',
-            id: generateUUID(),
-            gen_video: {
+        ],
+      },
+      submit_id: submitId,
+      metrics_extra: metricsExtra,
+      draft_content: JSON.stringify({
+        type: 'draft',
+        id: generateUUID(),
+        min_version: SEEDANCE_DRAFT_VERSION,
+        min_features: ['AIGC_Video_UnifiedEdit'],
+        is_from_tsn: true,
+        version: SEEDANCE_DRAFT_VERSION,
+        main_component_id: componentId,
+        component_list: [
+          {
+            type: 'video_base_component',
+            id: componentId,
+            min_version: '1.0.0',
+            aigc_mode: 'workbench',
+            metadata: {
               type: '',
               id: generateUUID(),
-              text_to_video_params: {
-                type: '',
-                id: generateUUID(),
-                video_gen_inputs: [
-                  {
-                    type: '',
-                    id: generateUUID(),
-                    min_version: SEEDANCE_DRAFT_VERSION,
-                    prompt: hasReferenceImages ? '' : normalizedPrompt,
-                    video_mode: hasReferenceImages ? 2 : 1,
-                    fps: 24,
-                    duration_ms: actualDuration * 1000,
-                    idip_meta_list: [],
-                    ...(hasReferenceImages
-                      ? {
-                          unified_edit_input: {
-                            type: '',
-                            id: generateUUID(),
-                            material_list: materialList,
-                            meta_list: metaList,
-                          },
-                        }
-                      : {}),
-                  },
-                ],
-                video_aspect_ratio: aspectRatio,
-                seed: Math.floor(Math.random() * 1000000000),
-                model_req_key: model,
-                priority: 0,
-              },
-              video_task_extra: metricsExtra,
+              created_platform: 3,
+              created_platform_version: '',
+              created_time_in_ms: String(Date.now()),
+              created_did: '',
             },
+            generate_type: 'gen_video',
+            abilities: {
+              type: '',
+              id: generateUUID(),
+              gen_video: genVideoAbility,
+            },
+            process_type: 1,
           },
-          process_type: 1,
-        },
-      ],
-    }),
-    http_common_info: {
-      aid: DEFAULT_ASSISTANT_ID,
-    },
+        ],
+      }),
+      http_common_info: {
+        aid: DEFAULT_ASSISTANT_ID,
+      },
+    };
   };
 
   let generateResult = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) {
+  let generateMode = hasReferenceImages ? 'unified' : 'text';
+  let generateBody = buildGenerateBody(generateMode);
+  let needRefreshSession = false;
+  const maxGenerateAttempts = 4;
+
+  for (let attempt = 0; attempt < maxGenerateAttempts; attempt++) {
+    if (needRefreshSession) {
       task.progress = '检测到安全校验，正在刷新会话后重试...';
       console.log(`[${taskId}] ret=4010，刷新浏览器会话并重试`);
       await browserService.refreshSession(
@@ -1501,6 +1534,7 @@ async function generateSeedanceVideo(
         authCookieHeader
       );
       await new Promise((r) => setTimeout(r, 1200));
+      needRefreshSession = false;
     }
 
     generateResult = await browserService.fetch(
@@ -1517,9 +1551,29 @@ async function generateSeedanceVideo(
       authCookieHeader
     );
 
-    if (String(generateResult?.ret) === '4010' && attempt === 0) {
+    const retCode = String(generateResult?.ret ?? '');
+    if (retCode === '0') {
+      break;
+    }
+
+    if (retCode === '4010' && attempt < maxGenerateAttempts - 1) {
+      needRefreshSession = true;
       continue;
     }
+
+    if (
+      retCode === '1000' &&
+      hasReferenceImages &&
+      generateMode === 'unified' &&
+      attempt < maxGenerateAttempts - 1
+    ) {
+      task.progress = '图生参数兼容中，正在自动切换模式重试...';
+      generateMode = 'first_frame_fallback';
+      generateBody = buildGenerateBody('first_frame');
+      console.log(`[${taskId}] ret=1000，切换首帧图生兼容模式重试`);
+      continue;
+    }
+
     break;
   }
 
@@ -1535,6 +1589,11 @@ async function generateSeedanceVideo(
     if (retCode === '4010') {
       throw new Error(
         `${platformConfig.name}API错误 (ret=4010): 触发安全校验。请先在${platformConfig.name}官网完成安全确认，然后更新最新 sessionid 再重试`
+      );
+    }
+    if (retCode === '1000' && hasReferenceImages) {
+      throw new Error(
+        `${platformConfig.name}API错误 (ret=1000): 图生参数校验失败。建议减少参考图数量（先用1张）并简化提示词后重试`
       );
     }
     throw new Error(`${platformConfig.name}API错误 (ret=${retCode}): ${errMsg}`);

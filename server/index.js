@@ -1263,14 +1263,61 @@ async function generateXyqAgentVideo(
       ''
   ).trim();
 
-  if (!consumerUid || !workspaceId) {
+  if (!workspaceId) {
     throw new Error(
-      `无法获取小云雀用户信息（consumer_uid/workspace_id）。请确认已在 ${platformConfig.baseUrl} 登录并完成验证，然后在设置里粘贴最新 Cookie 后重试`
+      `无法获取小云雀用户信息（workspace_id）。请确认已在 ${platformConfig.baseUrl} 登录并完成验证，然后在设置里粘贴最新 Cookie 后重试`
+    );
+  }
+
+  // 有些账号在 user/info 里拿不到 consumer_uid，这里通过历史接口兜底反查。
+  let resolvedConsumerUid = consumerUid;
+  if (!resolvedConsumerUid) {
+    try {
+      const historyProbe = await platformRequestViaBrowser(
+        'post',
+        '/api/biz/v1/agent/list_user_history',
+        sessionId,
+        platformConfig,
+        {
+          data: {
+            scopes: ['base'],
+            user: {
+              consumer_uid: '',
+              workspace_id: workspaceId,
+              app_id: XYQ_APP_ID,
+            },
+            page_token: '1',
+            page_size: 5,
+          },
+          headers: requestHeaders,
+        },
+        authCookieHeader
+      );
+
+      const threads = Array.isArray(historyProbe?.threads)
+        ? historyProbe.threads
+        : Array.isArray(historyProbe?.data?.threads)
+          ? historyProbe.data.threads
+          : [];
+      resolvedConsumerUid = String(
+        threads.find((item) => String(item?.user_id || '').trim())?.user_id || ''
+      ).trim();
+      if (resolvedConsumerUid) {
+        console.log(`[${taskId}] [小云雀] 已通过历史接口补全 consumer_uid`);
+      }
+    } catch (err) {
+      console.log(`[${taskId}] [小云雀] 历史接口反查 consumer_uid 失败: ${err.message}`);
+    }
+  }
+
+  if (!resolvedConsumerUid) {
+    throw new Error(
+      `无法获取小云雀用户信息（consumer_uid）。请在小云雀页面抓一条 list_user_history 请求，把 body 里的 consumer_uid 发给我`
     );
   }
 
   const xyqUserInfo = {
-    consumer_uid: consumerUid,
+    consumer_uid: resolvedConsumerUid,
     workspace_id: workspaceId,
     app_id: XYQ_APP_ID,
     ...(spaceId ? { space_id: spaceId } : {}),

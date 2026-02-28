@@ -87,7 +87,8 @@ function isRecoverableNetworkError(message: string): boolean {
     lower.includes('failed to fetch') ||
     lower.includes('network') ||
     lower.includes('网络') ||
-    lower.includes('非json')
+    lower.includes('非json') ||
+    lower.includes('视频生成超时')
   );
 }
 
@@ -345,7 +346,8 @@ export default function App() {
         if (isRecoverableNetworkError(message)) {
           setGeneration({
             status: 'error',
-            error: '网络中断，但任务可能仍在后台。稍后刷新页面会自动继续查询。',
+            error:
+              '任务仍在后台处理中（可能耗时较长）。稍后刷新页面会自动继续查询结果。',
           });
           return;
         }
@@ -422,7 +424,8 @@ export default function App() {
       if (isRecoverableNetworkError(message)) {
         setGeneration({
           status: 'error',
-          error: '网络中断，但任务可能仍在后台。刷新页面后会自动继续查询结果。',
+          error:
+            '任务仍在后台处理中（可能耗时较长）。刷新页面后会自动继续查询结果。',
         });
         return;
       }

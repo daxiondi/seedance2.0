@@ -133,7 +133,9 @@ export async function pollVideoTask(
   }
 
   const timeoutMinutes = Math.ceil(POLL_TIMEOUT_MS / 60000);
-  throw new Error(`视频生成超时 (约${timeoutMinutes}分钟)，请稍后重试`);
+  throw new Error(
+    `视频生成超时 (约${timeoutMinutes}分钟)，任务可能仍在后台处理中，请稍后刷新继续查询`
+  );
 }
 
 export async function generateVideo(

@@ -24,6 +24,13 @@ const VIDEO_GENERATION_TIMEOUT_MS =
   Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
     ? configuredTimeoutMs
     : 45 * 60 * 1000;
+const configuredXyqTimeoutMs = Number(
+  process.env.XYQ_VIDEO_GENERATION_TIMEOUT_MS
+);
+const XYQ_VIDEO_GENERATION_TIMEOUT_MS =
+  Number.isFinite(configuredXyqTimeoutMs) && configuredXyqTimeoutMs > 0
+    ? configuredXyqTimeoutMs
+    : 6 * 60 * 60 * 1000;
 const TASK_STORE_FILE = path.resolve(
   process.env.TASK_STORE_FILE || path.join(__dirname, '../data/tasks.json')
 );
@@ -37,8 +44,16 @@ const TASK_RESULT_TTL_MS = readPositiveNumber(
 );
 const TASK_PROCESSING_TTL_MS = readPositiveNumber(
   process.env.TASK_PROCESSING_TTL_MS ||
-    Math.max(VIDEO_GENERATION_TIMEOUT_MS * 2, 2 * 60 * 60 * 1000),
-  Math.max(VIDEO_GENERATION_TIMEOUT_MS * 2, 2 * 60 * 60 * 1000)
+    Math.max(
+      VIDEO_GENERATION_TIMEOUT_MS * 2,
+      XYQ_VIDEO_GENERATION_TIMEOUT_MS * 2,
+      2 * 60 * 60 * 1000
+    ),
+  Math.max(
+    VIDEO_GENERATION_TIMEOUT_MS * 2,
+    XYQ_VIDEO_GENERATION_TIMEOUT_MS * 2,
+    2 * 60 * 60 * 1000
+  )
 );
 
 app.use(cors());
@@ -312,6 +327,9 @@ function normalizeTask(task) {
         : Date.now(),
     result: task?.result ?? null,
     error: task?.error ? String(task.error) : null,
+    xyqThreadId: task?.xyqThreadId ? String(task.xyqThreadId) : null,
+    xyqRunId: task?.xyqRunId ? String(task.xyqRunId) : null,
+    xyqUserId: task?.xyqUserId ? String(task.xyqUserId) : null,
   };
 }
 
@@ -438,9 +456,18 @@ async function loadTaskStoreFromDisk() {
       }
 
       if (normalized.status === 'processing') {
-        normalized.status = 'error';
-        normalized.error = '服务已重启，未完成任务无法恢复，请重新提交。';
-        normalized.progress = '服务已重启，任务中断';
+        const hasXyqResumeContext =
+          normalized.platform === 'xyq' &&
+          normalized.xyqThreadId &&
+          normalized.xyqRunId &&
+          normalized.xyqUserId;
+        if (hasXyqResumeContext) {
+          normalized.progress = '服务重启后，正在恢复后台查询...';
+        } else {
+          normalized.status = 'error';
+          normalized.error = '服务已重启，未完成任务无法恢复，请重新提交。';
+          normalized.progress = '服务已重启，任务中断';
+        }
       }
 
       tasks.set(normalized.id, trackTask(normalized));
@@ -1470,6 +1497,9 @@ async function generateXyqAgentVideo(
     threadId;
   const actualRunId =
     submitResult?.run?.run_id || submitResult?.run_id || runId;
+  task.xyqThreadId = String(actualThreadId);
+  task.xyqRunId = String(actualRunId);
+  task.xyqUserId = String(resolvedConsumerUid);
 
   console.log(
     `[${taskId}] [小云雀] submit_run 已提交: thread_id=${actualThreadId}, run_id=${actualRunId}`
@@ -1481,7 +1511,7 @@ async function generateXyqAgentVideo(
   const pollStart = Date.now();
   let artifactId = null;
 
-  while (Date.now() - pollStart < VIDEO_GENERATION_TIMEOUT_MS) {
+  while (Date.now() - pollStart < XYQ_VIDEO_GENERATION_TIMEOUT_MS) {
     await new Promise((r) => setTimeout(r, 2000));
 
     const threadData = await platformRequestViaBrowser(
@@ -1493,7 +1523,6 @@ async function generateXyqAgentVideo(
         data: {
           thread_id: actualThreadId,
           scopes: ['run_list.entry_list'],
-          run_id: actualRunId,
         },
         headers: requestHeaders,
       },
@@ -1552,13 +1581,18 @@ async function generateXyqAgentVideo(
     const mins = Math.floor(elapsed / 60);
     if (elapsed < 120) {
       task.progress = 'AI正在生成视频，请耐心等待...';
-    } else {
+    } else if (elapsed < VIDEO_GENERATION_TIMEOUT_MS / 1000) {
       task.progress = `视频生成中，已等待 ${mins} 分钟...`;
+    } else {
+      task.progress = `生成耗时较长，后台持续查询中（已等待 ${mins} 分钟）...`;
     }
   }
 
   if (!artifactId) {
-    throw new Error('小云雀生成超时或未返回 artifact_id，请稍后重试');
+    const timeoutMinutes = Math.ceil(XYQ_VIDEO_GENERATION_TIMEOUT_MS / 60000);
+    throw new Error(
+      `小云雀生成超时（已等待约${timeoutMinutes}分钟）或未返回 artifact_id，请稍后重试`
+    );
   }
 
   task.progress = '正在解析生成结果...';
@@ -2386,6 +2420,9 @@ async function startServer() {
     console.log(`   - 小云雀: ${PLATFORM_CONFIGS.xyq.baseUrl}`);
     console.log(
       `⏱️ 生成超时时间: ${Math.ceil(VIDEO_GENERATION_TIMEOUT_MS / 60000)} 分钟`
+    );
+    console.log(
+      `⏱️ 小云雀轮询超时时间: ${Math.ceil(XYQ_VIDEO_GENERATION_TIMEOUT_MS / 60000)} 分钟`
     );
     console.log(
       `💾 任务持久化文件: ${TASK_STORE_FILE}`

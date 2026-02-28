@@ -1323,31 +1323,13 @@ async function generateSeedanceVideo(
     console.log(`[${taskId}] 未上传参考图，尝试文生视频模式`);
   }
 
-  // 第2步: 构建 material_list 和 meta_list
-  const materialList = uploadedImages.map((img) => ({
-    type: '',
-    id: generateUUID(),
-    material_type: 'image',
-    image_info: {
-      type: 'image',
-      id: generateUUID(),
-      source_from: 'upload',
-      platform_type: 1,
-      name: '',
-      image_uri: img.uri,
-      aigc_image: {
-        type: '',
-        id: generateUUID(),
-      },
-      width: img.width,
-      height: img.height,
-      format: '',
-      uri: img.uri,
-    },
-  }));
-
   const hasReferenceImages = uploadedImages.length > 0;
-  const metaList = buildMetaListFromPrompt(prompt || '', uploadedImages.length);
+  const primaryImage = hasReferenceImages ? uploadedImages[0] : null;
+  if (hasReferenceImages && uploadedImages.length > 1) {
+    console.log(
+      `[${taskId}] 当前即梦图生链路使用第1张参考图，其余 ${uploadedImages.length - 1} 张暂不参与生成`
+    );
+  }
 
   const componentId = generateUUID();
   const submitId = generateUUID();
@@ -1398,42 +1380,102 @@ async function generateSeedanceVideo(
   const generateUrl = `${platformConfig.baseUrl}/mweb/v1/aigc_draft/generate?${generateQueryParams}`;
 
   const buildGenerateBody = () => {
-    const useUnifiedEdit = hasReferenceImages;
-    const videoInput = {
-      type: '',
-      id: generateUUID(),
-      min_version: SEEDANCE_DRAFT_VERSION,
-      prompt: normalizedPrompt || (hasReferenceImages ? '请基于参考图生成视频' : ''),
-      video_mode: hasReferenceImages ? 2 : 1,
-      fps: 24,
-      duration_ms: actualDuration * 1000,
-      idip_meta_list: [],
-      ...(useUnifiedEdit
-        ? {
-            unified_edit_input: {
-              type: '',
-              id: generateUUID(),
-              material_list: materialList,
-              meta_list: metaList,
+    if (hasReferenceImages && primaryImage) {
+      return {
+        extend: {
+          root_model: model,
+          m_video_commerce_info: {
+            benefit_type: benefitType,
+            resource_id: 'generate_video',
+            resource_id_type: 'str',
+            resource_sub_type: 'aigc',
+          },
+          m_video_commerce_info_list: [
+            {
+              benefit_type: benefitType,
+              resource_id: 'generate_video',
+              resource_id_type: 'str',
+              resource_sub_type: 'aigc',
             },
-          }
-        : {}),
-    };
-
-    const genVideoAbility = {
-      type: '',
-      id: generateUUID(),
-      text_to_video_params: {
-        type: '',
-        id: generateUUID(),
-        video_gen_inputs: [videoInput],
-        video_aspect_ratio: aspectRatio,
-        seed: Math.floor(Math.random() * 1000000000),
-        model_req_key: model,
-        priority: 0,
-      },
-      video_task_extra: metricsExtra,
-    };
+          ],
+        },
+        submit_id: submitId,
+        metrics_extra: metricsExtra,
+        draft_content: JSON.stringify({
+          type: 'draft',
+          id: generateUUID(),
+          min_version: '3.0.5',
+          min_features: [],
+          is_from_tsn: true,
+          version: '3.3.10',
+          main_component_id: componentId,
+          component_list: [
+            {
+              type: 'video_base_component',
+              id: componentId,
+              min_version: '1.0.0',
+              aigc_mode: 'creation_agent',
+              gen_type: 10,
+              metadata: {
+                type: '',
+                id: generateUUID(),
+                created_platform: 4,
+                created_platform_version: '',
+                created_time_in_ms: String(Date.now()),
+                created_did: '',
+              },
+              generate_type: 'gen_video',
+              abilities: {
+                type: '',
+                id: generateUUID(),
+                gen_video: {
+                  type: '',
+                  id: generateUUID(),
+                  text_to_video_params: {
+                    type: '',
+                    id: generateUUID(),
+                    video_gen_inputs: [
+                      {
+                        type: '',
+                        id: generateUUID(),
+                        min_version: '3.0.5',
+                        prompt: normalizedPrompt || '请基于参考图生成视频',
+                        first_frame_image: {
+                          type: 'image',
+                          id: generateUUID(),
+                          source_from: 'upload',
+                          platform_type: 1,
+                          name: '',
+                          image_uri: primaryImage.uri,
+                          width: 0,
+                          height: 0,
+                          format: '',
+                          uri: primaryImage.uri,
+                        },
+                        video_mode: 2,
+                        fps: 24,
+                        duration_ms: actualDuration * 1000,
+                      },
+                    ],
+                    video_aspect_ratio: aspectRatio,
+                    seed: Math.floor(Math.random() * 1000000000),
+                    model_req_key: model,
+                  },
+                  video_ref_params: {
+                    type: '',
+                    id: generateUUID(),
+                    generate_type: 0,
+                  },
+                },
+              },
+            },
+          ],
+        }),
+        http_common_info: {
+          aid: DEFAULT_ASSISTANT_ID,
+        },
+      };
+    }
 
     return {
       extend: {
@@ -1481,7 +1523,31 @@ async function generateSeedanceVideo(
             abilities: {
               type: '',
               id: generateUUID(),
-              gen_video: genVideoAbility,
+              gen_video: {
+                type: '',
+                id: generateUUID(),
+                text_to_video_params: {
+                  type: '',
+                  id: generateUUID(),
+                  video_gen_inputs: [
+                    {
+                      type: '',
+                      id: generateUUID(),
+                      min_version: SEEDANCE_DRAFT_VERSION,
+                      prompt: normalizedPrompt,
+                      video_mode: 1,
+                      fps: 24,
+                      duration_ms: actualDuration * 1000,
+                      idip_meta_list: [],
+                    },
+                  ],
+                  video_aspect_ratio: aspectRatio,
+                  seed: Math.floor(Math.random() * 1000000000),
+                  model_req_key: model,
+                  priority: 0,
+                },
+                video_task_extra: metricsExtra,
+              },
             },
             process_type: 1,
           },

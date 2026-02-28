@@ -7,6 +7,9 @@ services:
       dockerfile: Dockerfile
       args:
         - VITE_DEFAULT_SESSION_ID=${VITE_DEFAULT_SESSION_ID:-}
+        - VITE_DEFAULT_XYQ_SESSION_ID=${VITE_DEFAULT_XYQ_SESSION_ID:-}
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-/api}
+        - VITE_BASE_PATH=${VITE_BASE_PATH:-/}
     image: seedance-web:latest
     container_name: seedance-web
     ports:
@@ -15,6 +18,7 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - VITE_DEFAULT_SESSION_ID=${VITE_DEFAULT_SESSION_ID:-}
+      - VITE_DEFAULT_XYQ_SESSION_ID=${VITE_DEFAULT_XYQ_SESSION_ID:-}
     restart: unless-stopped
     shm_size: '512mb'
     dns:

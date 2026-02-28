@@ -210,15 +210,31 @@ function resolveAuthContext(platformKey, requestSessionId) {
   }
 
   if (platformKey === 'xyq') {
+    const fallbackRaw = String(DEFAULT_XYQ_SESSION_ID || DEFAULT_SESSION_ID || '');
+    const fallbackCookieMap = parseCookieString(fallbackRaw);
+    const fallbackCookieHeader =
+      fallbackCookieMap.size > 0
+        ? Array.from(fallbackCookieMap.entries())
+            .map(([name, value]) => `${name}=${value}`)
+            .join('; ')
+        : '';
     const fallback = normalizeSessionInput(
       platformKey,
-      DEFAULT_XYQ_SESSION_ID || DEFAULT_SESSION_ID
+      fallbackRaw
     );
-    return { sessionId: fallback, cookieHeader: '' };
+    return { sessionId: fallback, cookieHeader: fallbackCookieHeader };
   }
+  const fallbackRaw = String(DEFAULT_SESSION_ID || '');
+  const fallbackCookieMap = parseCookieString(fallbackRaw);
+  const fallbackCookieHeader =
+    fallbackCookieMap.size > 0
+      ? Array.from(fallbackCookieMap.entries())
+          .map(([name, value]) => `${name}=${value}`)
+          .join('; ')
+      : '';
   return {
-    sessionId: normalizeSessionInput(platformKey, DEFAULT_SESSION_ID),
-    cookieHeader: '',
+    sessionId: normalizeSessionInput(platformKey, fallbackRaw),
+    cookieHeader: fallbackCookieHeader,
   };
 }
 
